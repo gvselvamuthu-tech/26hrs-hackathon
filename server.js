@@ -6,6 +6,7 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 
 const app = express();
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
@@ -13,8 +14,8 @@ app.use(express.json());
 app.get("/api/health", async (req, res) => {
   try {
     if (!process.env.MONGODB_URI) {
-      return res.status(500).json({
-        status: "error",
+      return res.status(503).json({
+        status: "degraded",
         message: "MONGODB_URI is not configured"
       });
     }
@@ -27,11 +28,17 @@ app.get("/api/health", async (req, res) => {
     });
   } catch (error) {
     console.error("Health check failed:", error.message);
-    res.status(500).json({
-      status: "error",
+    res.status(503).json({
+      status: "degraded",
       message: "Database connection failed"
     });
   }
 });
+
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
 
 module.exports = app;
