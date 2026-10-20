@@ -7,6 +7,7 @@ const cors = require("cors");
 const path = require("path");
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
+const { validateRegistrationPayload, RegistrationValidationError } = require("./lib/registration");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -143,7 +144,7 @@ const paymentSettingsSchema = new mongoose.Schema({
   key: { type: String, required: true, unique: true, default: "global_payment_settings" },
   upiId: { type: String, required: true, default: "suba.arni@okaxis" },
   payeeName: { type: String, required: true, default: "Banu Priya" },
-  fee: { type: String, required: true, default: "2000" },
+  fee: { type: String, required: true, default: "500" },
   qrImage: { type: String, default: "" },
   updatedAt: { type: Date, default: Date.now }
 });
@@ -153,7 +154,11 @@ const PaymentSettings = mongoose.models.PaymentSettings || mongoose.model("Payme
 // Team Member Sub-schema
 const teamMemberSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
-  email: { type: String, required: true, lowercase: true, trim: true }
+  email: { type: String, required: true, lowercase: true, trim: true },
+  mobile: { type: String, default: "", trim: true },
+  college: { type: String, default: "", trim: true },
+  department: { type: String, default: "", trim: true },
+  year: { type: String, default: "1", trim: true }
 }, { _id: false });
 
 // Team Schema (Full MongoDB persistence for teams, accounts, projects, & payment reviews)
@@ -164,7 +169,11 @@ const teamSchema = new mongoose.Schema({
   mobile: { type: String, required: true, trim: true, index: true },
   email: { type: String, required: true, lowercase: true, trim: true },
   college: { type: String, default: "", trim: true },
+  department: { type: String, default: "", trim: true },
   year: { type: String, default: "1", trim: true },
+  teamSize: { type: Number, min: 1, max: 4, default: 4 },
+  feePerPerson: { type: Number, default: 500 },
+  totalAmount: { type: Number, default: 2000 },
   members: { type: [teamMemberSchema], default: [] },
   track: { type: String, default: "", trim: true },
   problem: { type: String, default: "", trim: true },
@@ -214,7 +223,7 @@ let memoryPaymentSettings = {
   key: "global_payment_settings",
   upiId: "suba.arni@okaxis",
   payeeName: "Banu Priya",
-  fee: "2000",
+  fee: "500",
   qrImage: "",
   updatedAt: new Date().toISOString()
 };
@@ -502,61 +511,16 @@ async function generateNextTeamId() {
 // POST /api/teams/register - Public endpoint to register new team
 app.post("/api/teams/register", rateLimitLogin, async (req, res) => {
   try {
+    const registration = validateRegistrationPayload(req.body || {});
+    const [leader, ...normMembers] = registration.participants;
     await getDbConnection();
-    const { team, leader, mobile, email, college, year, members, method, utr, shot } = req.body || {};
 
-    const cleanTeam = String(team || "").trim();
-    const cleanLeader = String(leader || "").trim();
-    const cleanMobile = String(mobile || "").trim();
-    const cleanEmail = String(email || "").trim().toLowerCase();
-    const cleanCollege = String(college || "").trim();
-    const cleanYear = String(year || "1").trim();
-    const cleanUtr = String(utr || "").trim();
-
-    // Validation
-    if (!cleanTeam || cleanTeam.length < 2) {
-      return res.status(400).json({ success: false, error: "INVALID_TEAM_NAME", message: "Team name is required." });
-    }
-    if (!cleanLeader || cleanLeader.length < 2) {
-      return res.status(400).json({ success: false, error: "INVALID_LEADER_NAME", message: "Leader name is required." });
-    }
-    if (!/^\d{10}$/.test(cleanMobile)) {
-      return res.status(400).json({ success: false, error: "INVALID_MOBILE", message: "A valid 10-digit mobile number is required." });
-    }
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(cleanEmail)) {
-      return res.status(400).json({ success: false, error: "INVALID_EMAIL", message: "A valid email address is required." });
-    }
-    if (!cleanUtr) {
-      return res.status(400).json({ success: false, error: "INVALID_UTR", message: "Transaction ID / UTR is required." });
-    }
-
-    // Validate members (exactly 3 additional members for total 4)
-    const normMembers = [];
-    const allEmails = [cleanEmail];
-    if (Array.isArray(members)) {
-      for (const m of members) {
-        const mName = String(m?.name || "").trim();
-        const mEmail = String(m?.email || "").trim().toLowerCase();
-        if (mName && mEmail) {
-          if (!emailRegex.test(mEmail)) {
-            return res.status(400).json({ success: false, error: "INVALID_MEMBER_EMAIL", message: `Invalid member email: ${mEmail}` });
-          }
-          if (allEmails.includes(mEmail)) {
-            return res.status(400).json({ success: false, error: "DUPLICATE_EMAIL", message: `Duplicate email detected: ${mEmail}` });
-          }
-          allEmails.push(mEmail);
-          normMembers.push({ name: mName, email: mEmail });
-        }
-      }
-    }
-
-    // Check duplicate leader or duplicate email in database
+    const participantEmails = registration.participants.map(participant => participant.email);
     const existingLeader = await Team.findOne({
       $or: [
-        { email: cleanEmail },
-        { "members.email": { $in: allEmails } },
-        { mobile: cleanMobile }
+        { email: { $in: participantEmails } },
+        { "members.email": { $in: participantEmails } },
+        { mobile: leader.mobile }
       ]
     }).lean();
 
@@ -564,43 +528,41 @@ app.post("/api/teams/register", rateLimitLogin, async (req, res) => {
       return res.status(400).json({
         success: false,
         error: "DUPLICATE_REGISTRATION",
-        message: "A team with this leader email, mobile, or member email is already registered."
+        message: "A participant email or the team leader mobile is already registered."
       });
-    }
-
-    // Validate screenshot upload (capped at 3.5MB base64)
-    let cleanShot = typeof shot === "string" ? shot.trim() : "";
-    if (cleanShot.length > 5 * 1024 * 1024) {
-      return res.status(400).json({ success: false, error: "FILE_TOO_LARGE", message: "Payment screenshot must be under 3 MB." });
     }
 
     // Hash password with bcrypt (default password is leader mobile number)
     const saltRounds = 10;
-    const passwordHash = await bcrypt.hash(cleanMobile, saltRounds);
+    const passwordHash = await bcrypt.hash(leader.mobile, saltRounds);
     const newTeamId = await generateNextTeamId();
 
     const createdTeam = await Team.create({
       id: newTeamId,
-      name: cleanTeam,
-      leader: cleanLeader,
-      mobile: cleanMobile,
-      email: cleanEmail,
-      college: cleanCollege,
-      year: cleanYear,
+      name: registration.team,
+      leader: leader.name,
+      mobile: leader.mobile,
+      email: leader.email,
+      college: leader.college,
+      department: leader.department,
+      year: leader.year,
+      teamSize: registration.teamSize,
+      feePerPerson: registration.feePerPerson,
+      totalAmount: registration.totalAmount,
       members: normMembers,
       track: "",
       problem: "",
       title: "",
       desc: "",
       pay: {
-        method: String(method || "UPI").trim(),
-        utr: cleanUtr,
-        shot: cleanShot,
+        method: registration.method,
+        utr: registration.utr,
+        shot: registration.shot,
         status: "Pending"
       },
       status: "Pending",
       acc: {
-        userId: cleanLeader,
+        userId: leader.name,
         passwordHash,
         enabled: false // Admin approval required
       }
@@ -613,12 +575,26 @@ app.post("/api/teams/register", rateLimitLogin, async (req, res) => {
         id: createdTeam.id,
         name: createdTeam.name,
         leader: createdTeam.leader,
+        teamSize: createdTeam.teamSize,
+        feePerPerson: createdTeam.feePerPerson,
+        totalAmount: createdTeam.totalAmount,
         userId: createdTeam.acc.userId,
         status: createdTeam.status,
-        payStatus: createdTeam.pay.status
+        payStatus: createdTeam.pay.status,
+        createdAt: createdTeam.createdAt
       }
     });
   } catch (err) {
+    if (err instanceof RegistrationValidationError) {
+      return res.status(400).json({ success: false, error: err.code, message: err.message });
+    }
+    if (err.message === "MONGODB_URI_NOT_CONFIGURED" || /mongoose|mongo|database/i.test(err.name || "")) {
+      return res.status(503).json({
+        success: false,
+        error: "DATABASE_UNAVAILABLE",
+        message: "Registration could not be saved because the database is unavailable. Please try again later."
+      });
+    }
     console.error("Team registration error:", err);
     return res.status(500).json({
       success: false,
@@ -734,7 +710,12 @@ app.get("/api/teams/me", authenticateTeam, async (req, res) => {
         mobile: team.mobile,
         email: team.email,
         college: team.college,
+        department: team.department || "",
         year: team.year,
+        teamSize: team.teamSize || (1 + (team.members || []).length),
+        feePerPerson: team.feePerPerson || 500,
+        totalAmount: team.totalAmount || (team.teamSize || (1 + (team.members || []).length)) * 500,
+        createdAt: team.createdAt,
         members: team.members,
         track: team.track,
         problem: team.problem,
@@ -823,7 +804,12 @@ app.get("/api/admin/teams", authenticateAdmin, async (req, res) => {
       mobile: t.mobile,
       email: t.email,
       college: t.college,
+      department: t.department || "",
       year: t.year,
+      teamSize: t.teamSize || (1 + (t.members || []).length),
+      feePerPerson: t.feePerPerson || 500,
+      totalAmount: t.totalAmount || (t.teamSize || (1 + (t.members || []).length)) * 500,
+      createdAt: t.createdAt,
       members: t.members,
       track: t.track,
       problem: t.problem,
@@ -855,7 +841,7 @@ app.put("/api/admin/teams/:id", authenticateAdmin, async (req, res) => {
   try {
     await getDbConnection();
     const targetId = req.params.id;
-    const { name, leader, mobile, email, college, year, track, problem, title, desc, ps, st, utr, members, enabled, password } = req.body || {};
+    const { name, leader, mobile, email, college, department, year, track, problem, title, desc, ps, st, utr, members, enabled, password } = req.body || {};
 
     const updateFields = { updatedAt: new Date() };
     if (name !== undefined) updateFields.name = String(name).trim();
@@ -863,6 +849,7 @@ app.put("/api/admin/teams/:id", authenticateAdmin, async (req, res) => {
     if (mobile !== undefined) updateFields.mobile = String(mobile).trim();
     if (email !== undefined) updateFields.email = String(email).trim().toLowerCase();
     if (college !== undefined) updateFields.college = String(college).trim();
+    if (department !== undefined) updateFields.department = String(department).trim();
     if (year !== undefined) updateFields.year = String(year).trim();
     if (track !== undefined) updateFields.track = String(track).trim();
     if (problem !== undefined) updateFields.problem = String(problem).trim();
