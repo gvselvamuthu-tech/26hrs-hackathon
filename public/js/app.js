@@ -79,6 +79,8 @@ let rawDb=null;
 try{rawDb=JSON.parse(localStorage.getItem(KEY)||'null')}catch(e){}
 let db=rawDb||DEF;
 if(db.admin && db.admin.pw){delete db.admin.pw;try{localStorage.setItem(KEY,JSON.stringify(db))}catch(e){}}
+// Security hygiene: Ensure no team acc.password is ever persisted in localStorage
+if(Array.isArray(db.teams)){db.teams.forEach(t=>{if(t.acc&&'password' in t.acc)delete t.acc.password;});}
 db.event={...DEF.event,...(db.event||{})};
 db.event.fee=String(REGISTRATION_FEE_PER_PERSON);
 if(!db.event.title||db.event.title==='24H Hackathon')db.event.title=DEF.event.title;
@@ -98,9 +100,16 @@ if(!db.faq?.length)db.faq=[...DEF.faq];
 db.rules=db.rules.map(item=>item.t==='Eligibility & Team Size'&&/exactly 4 members/i.test(item.d)?{...item,d:DEF.rules[0].d}:item);
 db.faq=db.faq.map(item=>item.t==='What is the required team size?'&&/4 members/i.test(item.d)?{...item,d:DEF.faq.find(entry=>entry.t===item.t).d}:item);
 db.problemStatementFiles ||= [];
-const save=()=>{db.teams.forEach(t=>t.members=normalizeMembers(t.members));localStorage.setItem(KEY,JSON.stringify(db))};
+const save=()=>{
+  db.teams.forEach(t=>{
+    t.members=normalizeMembers(t.members);
+    if(t.acc&&'password' in t.acc)delete t.acc.password;
+  });
+  localStorage.setItem(KEY,JSON.stringify(db));
+};
 db.teams.forEach(t=>t.members=normalizeMembers(t.members));save();
 let ses=JSON.parse(sessionStorage.getItem('h24s')||'null'),reg={step:1,d:{teamSize:2},participants:[],submitting:false,error:''},adm={tab:'overview',q:'',teamSize:'',payStatus:''};
+let adminSessionStatus='unknown',adminSessionPromise=null,adminTeamsSyncPromise=null,adminTeamsSyncAttempted=false;
 const ADDR='Komarapalayam – 637303, Namakkal District, Tamil Nadu';
 const badge=v=>`<span class="tag ${/inactive|reject|disab|fail/i.test(v)?'x':/paid|approved|enabled|complete|active/i.test(v)?'':'p'}">${esc(v)}</span>`;
 const empty=t=>`<p class="glass">${t} — the admin will add this soon.</p>`;
@@ -395,8 +404,9 @@ function initScrollReveal(){
 const lines=(a,f)=>a.map(f).join('\n');
 const parse=(t,keys)=>t.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{const p=l.split('|').map(x=>x.trim());return Object.fromEntries(keys.map((k,i)=>[k,p[i]||'']))});
 const go=(h,sec)=>{location.hash='#/'+h;if(sec)setTimeout(()=>document.getElementById(sec)?.scrollIntoView(),80);$('nav')?.classList.remove('open')};
-const login=(role,id)=>{ses={role,id};sessionStorage.setItem('h24s',JSON.stringify(ses))};
+const login=(role,id)=>{ses={role,id};sessionStorage.setItem('h24s',JSON.stringify(ses));if(role==='admin'){adminSessionStatus='unknown';adminSessionPromise=null;adminTeamsSyncAttempted=false}};
 const logout=async ()=>{
+  if(ses?.role==='admin'){adminSessionStatus='unknown';adminSessionPromise=null;adminTeamsSyncPromise=null;adminTeamsSyncAttempted=false}
   if(ses?.role==='admin'){
     try{await fetch('/api/admin/logout',{method:'POST'});}catch(e){}
   }
@@ -411,6 +421,110 @@ function openModal(h){const m=$('#modal');m.innerHTML=`<div class="glass">${h}</
 const closeModal=()=>$('#modal').classList.add('hide');
 let whatsappCloseTimer;
 let paymentCloseTimer;
+let eventSyncStatus = 'idle'; // 'idle' | 'syncing' | 'synced' | 'error'
+let eventSyncError = '';
+
+async function fetchBackendEventData() {
+  const res = await fetch('/api/event');
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.message || `Server returned error (${res.status})`);
+  }
+  const json = await res.json();
+  if (!json.success || !json.data) {
+    throw new Error(json.message || 'Malformed event data response');
+  }
+  return json.data;
+}
+
+async function syncEventDataOnLoad() {
+  eventSyncStatus = 'syncing';
+  eventSyncError = '';
+  try {
+    const data = await fetchBackendEventData();
+    if (data) {
+      if (data.event) db.event = { ...DEF.event, ...data.event };
+      if (Array.isArray(data.timeline)) db.timeline = data.timeline;
+      if (Array.isArray(data.rules)) db.rules = data.rules;
+      if (Array.isArray(data.prizes)) db.prizes = data.prizes;
+      if (Array.isArray(data.judges)) db.judges = data.judges;
+      if (Array.isArray(data.faq)) db.faq = data.faq;
+      if (Array.isArray(data.tracks)) db.tracks = data.tracks;
+      if (Array.isArray(data.problemStatementFiles)) db.problemStatementFiles = data.problemStatementFiles;
+      if (Array.isArray(data.announcements)) db.announcements = data.announcements;
+
+      eventSyncStatus = 'synced';
+      eventSyncError = '';
+      save(); // Cache to localStorage
+      view();
+    }
+  } catch (err) {
+    console.error('Failed to load event data from /api/event:', err);
+    eventSyncStatus = 'error';
+    eventSyncError = 'Unable to connect to live server. Displaying cached data: ' + (err.message || 'Network error');
+    view();
+    toast('Live event data failed to load: ' + (err.message || 'Server error'));
+  }
+}
+
+async function uploadProblemStatementFileContent(fileId, payload) {
+  const res = await fetch(`/api/admin/problem-file/${encodeURIComponent(fileId)}`, {
+    method: 'PUT',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || !json.success) {
+    throw new Error(json.message || `Failed to upload problem statement file (${res.status})`);
+  }
+  return json;
+}
+
+async function publishEventDataToBackend() {
+  // Map problem statement files: send problem statement files as metadata only, NEVER fileData
+  const problemFilesPayload = db.problemStatementFiles.map(item => ({
+    id: item.id,
+    track: item.track,
+    title: item.title,
+    description: item.description,
+    fileName: item.fileName,
+    fileType: item.fileType,
+    uploadDate: item.uploadDate,
+    active: item.active !== false
+  }));
+
+  const payload = {
+    event: db.event,
+    timeline: db.timeline,
+    rules: db.rules,
+    prizes: db.prizes,
+    judges: db.judges,
+    faq: db.faq,
+    tracks: db.tracks,
+    problemStatementFiles: problemFilesPayload,
+    announcements: db.announcements
+  };
+
+  const payloadStr = JSON.stringify(payload);
+  if (payloadStr.length > 1024 * 1024) {
+    throw new Error('Event data payload exceeds the maximum allowed size of 1 MB.');
+  }
+
+  const res = await fetch('/api/event', {
+    method: 'PUT',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: payloadStr
+  });
+
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || !json.success) {
+    throw new Error(json.message || `Failed to publish event data (${res.status})`);
+  }
+  return json;
+}
+
 async function fetchBackendPaymentSettings() {
   try {
     const res = await fetch('/api/payment-settings');
@@ -617,12 +731,12 @@ function participantSummary(participant,index){
 function register(){
  const d=reg.d,s=reg.step,names=['Team','Participants','Payment','Done'],size=registrationSize(),total=size*REGISTRATION_FEE_PER_PERSON;
  let h=`<section class="narrow registration-flow"><h2>Team Registration</h2><div class="steps">${names.map((n,i)=>`<span class="${i+1===s?'on':''}">${i+1}. ${n}</span>`).join('')}</div><div class="glass">`;
- if(s===1)h+=`<form onsubmit="return rs(event,1)"><div class="two">
+ if(s===1)h+=`<form id="registration-step1-form" onsubmit="return rs(event,1)"><div class="two">
  ${F('Team Name','team',d.team,'text','maxlength="100"')}
  <label>Team Size<select name="teamSize" required onchange="updateRegistrationTeamSize(this.value)">${[2,3,4].map(count=>`<option value="${count}" ${size===count?'selected':''}>${count} Members — ${formatRupees(count*REGISTRATION_FEE_PER_PERSON)}</option>`).join('')}</select></label>
  </div>${registrationFeeSummary(size,total)}<button class="btn">Next: Participant Details</button></form>`;
  if(s===2){
-  h+=`<form onsubmit="return rs(event,2)"><div class="two"><label>Team Size<select name="teamSize" required onchange="updateRegistrationTeamSize(this.value)">${[2,3,4].map(count=>`<option value="${count}" ${size===count?'selected':''}>${count} Members — ${formatRupees(count*REGISTRATION_FEE_PER_PERSON)}</option>`).join('')}</select></label></div>${registrationFeeSummary(size,total)}<p class="registration-intro">Enter complete details for all ${size} participants. The team leader is participant 1.</p>`;
+  h+=`<form id="registration-step2-form" onsubmit="return rs(event,2)"><div class="two"><label>Team Size<select name="teamSize" required onchange="updateRegistrationTeamSize(this.value)">${[2,3,4].map(count=>`<option value="${count}" ${size===count?'selected':''}>${count} Members — ${formatRupees(count*REGISTRATION_FEE_PER_PERSON)}</option>`).join('')}</select></label></div>${registrationFeeSummary(size,total)}<p class="registration-intro">Enter complete details for all ${size} participants. The team leader is participant 1.</p>`;
   for(let i=0;i<size;i++)h+=participantCard(reg.participants[i],i);
   h+=`${reg.error?`<p class="registration-error" role="alert">${esc(reg.error)}</p>`:''}<button type="button" class="btn ghost" onclick="reg.step=1;reg.error='';view()">Back</button> <button class="btn">Review payment</button></form>`;
  }
@@ -673,45 +787,170 @@ function rs(ev,s){
  }
  return false;
 }
+function compressScreenshot(file){
+ return new Promise(async (resolve,reject)=>{
+  const validTypes=['image/jpeg','image/png','image/webp'];
+  const ext=(file.name||'').split('.').pop()?.toLowerCase();
+  if(['heic','heif'].includes(ext)||file.type==='image/heic'||file.type==='image/heif'){
+   return reject(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
+  }
+  if(file.type&&!validTypes.includes(file.type)){
+   return reject(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
+  }
+
+  let settled=false;
+  const timeoutId=setTimeout(()=>{
+   if(settled)return;
+   settled=true;
+   reject(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
+  },10000);
+
+  function finish(err,result){
+   if(settled)return;
+   settled=true;
+   clearTimeout(timeoutId);
+   if(err)reject(err);
+   else resolve(result);
+  }
+
+  // 1. Try createImageBitmap first
+  if(typeof createImageBitmap==='function'){
+   try{
+    const bmp=await createImageBitmap(file);
+    const maxDim=1200;
+    let width=bmp.width,height=bmp.height;
+    if(width>maxDim||height>maxDim){
+     if(width>=height){
+      height=Math.round((height*maxDim)/width);
+      width=maxDim;
+     }else{
+      width=Math.round((width*maxDim)/height);
+      height=maxDim;
+     }
+    }
+    const canvas=document.createElement('canvas');
+    canvas.width=width;canvas.height=height;
+    const ctx=canvas.getContext('2d');
+    ctx.drawImage(bmp,0,0,width,height);
+    try{bmp.close()}catch(e){}
+    const dataUrl=canvas.toDataURL('image/jpeg',0.7);
+    if(dataUrl.length>950000){
+     return finish(new Error('Compressed screenshot exceeds 0.7 MB limit. Please select a smaller image.'));
+    }
+    return finish(null,dataUrl);
+   }catch(bmpErr){
+    // Fall back to Image() / ObjectURL if createImageBitmap fails
+   }
+  }
+
+  // 2. Fallback to Image() with ObjectURL
+  let objectUrl='';
+  try{
+   objectUrl=URL.createObjectURL(file);
+  }catch(e){
+   return finish(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
+  }
+
+  const img=new Image();
+  const cleanup=()=>{
+   if(objectUrl){
+    try{URL.revokeObjectURL(objectUrl)}catch(e){}
+    objectUrl='';
+   }
+  };
+
+  img.onerror=()=>{
+   cleanup();
+   finish(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
+  };
+
+  img.onload=()=>{
+   try{
+    const maxDim=1200;
+    let width=img.width,height=img.height;
+    if(width>maxDim||height>maxDim){
+     if(width>=height){
+      height=Math.round((height*maxDim)/width);
+      width=maxDim;
+     }else{
+      width=Math.round((width*maxDim)/height);
+      height=maxDim;
+     }
+    }
+    const canvas=document.createElement('canvas');
+    canvas.width=width;canvas.height=height;
+    const ctx=canvas.getContext('2d');
+    ctx.drawImage(img,0,0,width,height);
+    cleanup();
+    const dataUrl=canvas.toDataURL('image/jpeg',0.7);
+    if(dataUrl.length>950000){
+     return finish(new Error('Compressed screenshot exceeds 0.7 MB limit. Please select a smaller image.'));
+    }
+    finish(null,dataUrl);
+   }catch(err){
+    cleanup();
+    finish(new Error('Failed to compress screenshot: '+err.message));
+   }
+  };
+
+  img.src=objectUrl;
+ });
+}
 async function submitRegistration(ev){
  ev.preventDefault();
  if(reg.submitting)return false;
- const form=ev.target,formData=new FormData(form),file=form.querySelector('input[name="shot"]').files[0];
+ const form=ev.target,formData=new FormData(form),file=form.querySelector('input[name="shot"]')?.files?.[0];
  reg.d.method=String(formData.get('method')||'UPI');reg.d.utr=String(formData.get('utr')||'').trim();
  if(formData.get('pendingAcknowledged')!=='yes'){reg.error='Please acknowledge that payment will remain pending until verified.';view();return false}
  if(file){
   const validTypes=['image/jpeg','image/png','image/webp'];
-  if(!validTypes.includes(file.type)||file.size>3*1024*1024){reg.error='Choose a JPG, PNG, or WEBP screenshot smaller than 3 MB.';view();return false}
+  const ext=(file.name||'').split('.').pop()?.toLowerCase();
+  if(['heic','heif'].includes(ext)||file.type==='image/heic'||file.type==='image/heif'){
+   reg.error='This image could not be read. Please upload a JPG or PNG screenshot.';view();return false;
+  }
+  if(file.type&&!validTypes.includes(file.type)){
+   reg.error='This image could not be read. Please upload a JPG or PNG screenshot.';view();return false;
+  }
  }
  reg.submitting=true;reg.error='';
  const submitButton=form.querySelector('button[type="submit"]');
  if(submitButton){submitButton.disabled=true;submitButton.textContent='Submitting…'}
  try{
   let shot='';
-  if(file)shot=await new Promise((resolve,reject)=>{
-   const reader=new FileReader();reader.onload=()=>typeof reader.result==='string'?resolve(reader.result):reject(new Error('Could not read the payment screenshot.'));
-   reader.onerror=()=>reject(new Error('Could not read the payment screenshot.'));
-   reader.readAsDataURL(file);
-  });
+  if(file){
+   shot=await compressScreenshot(file);
+  }
   const totalAmount=registrationTotal();
   const response=await fetch('/api/teams/register',{
    method:'POST',headers:{'Content-Type':'application/json'},
    body:JSON.stringify({team:reg.d.team,teamSize:registrationSize(),feePerPerson:REGISTRATION_FEE_PER_PERSON,totalAmount,participants:reg.participants,method:formData.get('method'),utr:formData.get('utr'),shot})
   });
-  const result=await response.json();
-  if(!response.ok||!result.success||!result.data?.id)throw new Error(result.message||'Registration could not be saved.');
+  let result=null;
+  const rawText=await response.text();
+  try{
+   result=JSON.parse(rawText);
+  }catch(_jsonErr){
+   result=null;
+  }
+  if(!response.ok||!result?.success||!result?.data?.id){
+   const errorMsg=result?.message||`Registration failed (${response.status}: ${response.statusText||'Server error'}).`;
+   throw new Error(errorMsg);
+  }
   const data=result.data,leader=reg.participants[0],members=reg.participants.slice(1);
   const team={
    id:data.id,name:reg.d.team,leader:leader.name,mobile:leader.mobile,email:leader.email,college:leader.college,department:leader.department,year:leader.year,
    teamSize:data.teamSize,totalAmount:data.totalAmount,feePerPerson:data.feePerPerson,createdAt:data.createdAt,
    members,track:'',problem:'',title:'',desc:'',
-   pay:{method:formData.get('method'),utr:String(formData.get('utr')||'').trim(),shot,status:data.payStatus||'Pending'},
+   pay:{method:formData.get('method'),utr:String(formData.get('utr')||'').trim(),hasShot:Boolean(shot),status:data.payStatus||'Pending'},
    status:data.status||'Pending',acc:{userId:data.userId,enabled:false}
   };
   db.teams.push(team);save();reg.done=team;reg.step=4;reg.submitting=false;view();
  }catch(error){
-  reg.submitting=false;reg.error=error.message||'Registration could not be saved. Please try again.';
+  reg.submitting=false;
+  reg.error=error.message||'This image could not be read. Please upload a JPG or PNG screenshot.';
   view();
+ }finally{
+  reg.submitting=false;
  }
  return false;
 }
@@ -731,12 +970,14 @@ async function doLogin(e){
         credentials:'include',
         body:JSON.stringify({username:u,password:p})
       });
-      const data=await res.json();
-      if(res.ok && data.success){
+      let data=null;
+      const rawText=await res.text();
+      try{data=JSON.parse(rawText);}catch(_e){data=null;}
+      if(res.ok && data?.success){
         login('admin');
         go('admin');
       } else {
-        er.textContent=data.message||'Invalid admin ID or password.';
+        er.textContent=data?.message||`Invalid admin ID or password (${res.status}).`;
       }
     }catch(err){
       er.textContent='Server connection error. Please ensure the backend is running.';
@@ -751,14 +992,16 @@ async function doLogin(e){
       credentials:'include',
       body:JSON.stringify({username:u,password:p})
     });
-    const data=await res.json();
-    if(res.ok && data.success && data.teamId){
+    let data=null;
+    const rawText=await res.text();
+    try{data=JSON.parse(rawText);}catch(_e){data=null;}
+    if(res.ok && data?.success && data?.teamId){
       login('team',data.teamId);
       // Fetch latest profile from server
       try{
         const meRes=await fetch('/api/teams/me',{credentials:'include'});
         const meData=await meRes.json();
-        if(meRes.ok && meData.data){
+        if(meRes.ok && meData?.data){
           let existingIdx=db.teams.findIndex(t=>t.id===meData.data.id);
           if(existingIdx>=0) db.teams[existingIdx]=meData.data;
           else db.teams.push(meData.data);
@@ -768,16 +1011,74 @@ async function doLogin(e){
       go('team');
       return false;
     } else {
-      er.textContent=data.message||'Invalid User ID or password.';
+      er.textContent=data?.message||'Invalid User ID or password.';
       return false;
     }
   }catch(err){
-    console.warn('Backend team login unreachable, attempting fallback:',err.message);
-    const t=db.teams.find(t=>String(t.acc.userId).toLowerCase()===u.toLowerCase()&&t.acc.password===p);
-    if(!t)er.textContent='Invalid User ID or password.';else if(!t.acc.enabled)er.textContent='Your account is not enabled yet. Please wait for the admin to enable it.';else{login('team',t.id);go('team')}
+    er.textContent='Server connection error. Please ensure the backend is running.';
     return false;
   }
 }/* ---------- TEAM DASHBOARD (own data only) ---------- */
+function downloadBase64DataUrl(dataUrl, fileName, viewInNewTab = false) {
+  if (viewInNewTab) {
+    const win = window.open();
+    if (win) {
+      win.document.write(`<iframe src="${dataUrl}" frameborder="0" style="border:0; top:0px; left:0px; bottom:0px; right:0px; width:100%; height:100%;" allowfullscreen></iframe>`);
+      return;
+    }
+  }
+  const a = document.createElement('a');
+  a.href = dataUrl;
+  a.download = fileName || 'problem-statement-file';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+async function downloadTeamProblemFile(fileId, fileName, viewInNewTab = false) {
+  try {
+    toast('Fetching problem statement file...');
+    const res = await fetch(`/api/teams/problem-file/${encodeURIComponent(fileId)}`, {
+      credentials: 'include'
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.success) {
+      toast(json.message || 'Failed to download problem file.');
+      return;
+    }
+    const fileData = json.data?.fileData;
+    if (!fileData) {
+      toast('File content is empty.');
+      return;
+    }
+    downloadBase64DataUrl(fileData, json.data?.fileName || fileName, viewInNewTab);
+  } catch (err) {
+    toast('Network error downloading file: ' + err.message);
+  }
+}
+
+async function downloadAdminProblemFile(fileId, fileName, viewInNewTab = false) {
+  try {
+    toast('Fetching problem statement file...');
+    const res = await fetch(`/api/admin/problem-file/${encodeURIComponent(fileId)}`, {
+      credentials: 'include'
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.success) {
+      toast(json.message || 'Failed to download problem file.');
+      return;
+    }
+    const fileData = json.data?.fileData;
+    if (!fileData) {
+      toast('File content is empty.');
+      return;
+    }
+    downloadBase64DataUrl(fileData, json.data?.fileName || fileName, viewInNewTab);
+  } catch (err) {
+    toast('Network error downloading file: ' + err.message);
+  }
+}
+
 function teamPg(){const t=myTeam();if(!t){logout();return ''}const e=db.event;
  const assignedStatement=t.problemStatementId?db.problemStatementFiles.find(item=>item.id===t.problemStatementId):db.problemStatementFiles.find(item=>item.track===t.track&&item.title===t.problem);
  const assignedTrack=assignedStatement?.track||t.track,assignedProblem=assignedStatement?.title||t.problem,statementFile=assignedStatement?.active?assignedStatement:null;
@@ -786,7 +1087,7 @@ function teamPg(){const t=myTeam();if(!t){logout();return ''}const e=db.event;
  <h3>Members</h3>${renderTeamMembers(t.members)}</div>
  <div class="glass" style="margin-top:16px"><h3>TRACK & PROBLEM STATEMENT</h3><p>Assigned Track Name: <b>${esc(assignedTrack||'Not selected yet')}</b><br>Problem Statement Title: <b>${esc(assignedProblem||'Not selected yet')}</b></p>
  ${assignedStatement?`<p>Problem Statement Description: ${esc(assignedStatement.description||'')}</p>`:''}
- ${statementFile?`<p>File Name: <b>${esc(statementFile.fileName)}</b><br>File Type: ${esc(statementFile.fileType)}<br>Upload Date: ${esc(statementFile.uploadDate)}</p><p><a class="btn sm" href="${statementFile.fileData}" target="_blank" rel="noopener noreferrer">View File</a> <a class="btn sm ghost" href="${statementFile.fileData}" download="${esc(statementFile.fileName)}">Download File</a></p>`:assignedStatement?'<p>This problem statement file is currently unavailable.</p>':'<p>No active problem statement file has been assigned yet.</p>'}
+ ${statementFile?`<p>File Name: <b>${esc(statementFile.fileName)}</b><br>File Type: ${esc(statementFile.fileType)}<br>Upload Date: ${esc(statementFile.uploadDate)}</p><p><button class="btn sm" type="button" onclick="downloadTeamProblemFile('${statementFile.id}','${esc(statementFile.fileName)}',true)">View File</button> <button class="btn sm ghost" type="button" onclick="downloadTeamProblemFile('${statementFile.id}','${esc(statementFile.fileName)}',false)">Download File</button></p>`:assignedStatement?'<p>This problem statement file is currently unavailable.</p>':'<p>No active problem statement file has been assigned yet.</p>'}
  ${db.tracks.length?`<form onsubmit="return saveTeamSelection(event)"><label>Track<select name="track" onchange="refreshTeamProblems(this.value)">${trackOptions(t.track)}</select></label><label>Problem Statement<select id="teamProblem" name="problem">${problemOptions(t.track,t.problem)}</select></label><button class="btn">Save selection</button></form>`:'<p>Tracks are not published yet</p>'}</div>
  <div class="glass" style="margin-top:16px"><h3>Hackathon information</h3><p>Date: ${esc(e.date||TBA)} · Time: ${esc(e.time)} · Venue: ${esc(e.venue)}</p><h3>Announcements</h3>${db.announcements.map(a=>`<p><b>${esc(a.t)}</b> – ${esc(a.d)}</p>`).join('')||'<p>No announcements yet.</p>'}</div>
  <button class="btn ghost" style="margin-top:16px" onclick="logout()">Logout</button></section>`}
@@ -821,7 +1122,7 @@ const PROBLEM_FILE_EXTENSIONS=['pdf','doc','docx','ppt','pptx','zip'];
 function problemStatementFilesAdmin(){
  const current=db.problemStatementFiles.find(item=>item.id===adm.editProblemFileId),trackNames=[...new Set([...db.tracks.map(track=>track.name),...db.problemStatementFiles.map(item=>item.track)])];
  const accept='.pdf,.doc,.docx,.ppt,.pptx,.zip';
- const records=db.problemStatementFiles.map(item=>`<div class="glass" style="margin-top:12px"><div class="two"><p><b>Track:</b> ${esc(item.track)}</p><p><b>Problem Statement:</b> ${esc(item.title)}</p><p><b>File Name:</b> ${esc(item.fileName)}</p><p><b>File Type:</b> ${esc(item.fileType)}</p><p><b>Upload Date:</b> ${esc(item.uploadDate)}</p><p><b>Status:</b> ${badge(item.active?'Active':'Inactive')}</p></div><p>${esc(item.description)}</p><button class="btn sm" type="button" onclick="editProblemStatementFile('${item.id}')">Edit</button> <label class="btn sm ghost" for="replace-file-${item.id}" style="display:inline-block;cursor:pointer">Replace File</label><input id="replace-file-${item.id}" type="file" accept="${accept}" hidden onchange="replaceProblemStatementFile(event,'${item.id}')"> <button class="btn sm ghost" type="button" onclick="toggleProblemStatementFile('${item.id}')">${item.active?'Disable':'Enable'}</button> <button class="btn sm red" type="button" onclick="deleteProblemStatementFile('${item.id}')">Delete</button></div>`).join('')||'<p class="glass">No problem statement files have been added yet.</p>';
+ const records=db.problemStatementFiles.map(item=>`<div class="glass" style="margin-top:12px"><div class="two"><p><b>Track:</b> ${esc(item.track)}</p><p><b>Problem Statement:</b> ${esc(item.title)}</p><p><b>File Name:</b> ${esc(item.fileName)}</p><p><b>File Type:</b> ${esc(item.fileType)}</p><p><b>Upload Date:</b> ${esc(item.uploadDate)}</p><p><b>Status:</b> ${badge(item.active?'Active':'Inactive')}</p></div><p>${esc(item.description)}</p><button class="btn sm" type="button" onclick="editProblemStatementFile('${item.id}')">Edit</button> <button class="btn sm ghost" type="button" onclick="downloadAdminProblemFile('${item.id}','${esc(item.fileName)}',false)">Download File</button> <label class="btn sm ghost" for="replace-file-${item.id}" style="display:inline-block;cursor:pointer">Replace File</label><input id="replace-file-${item.id}" type="file" accept="${accept}" hidden onchange="replaceProblemStatementFile(event,'${item.id}')"> <button class="btn sm ghost" type="button" onclick="toggleProblemStatementFile('${item.id}')">${item.active?'Disable':'Enable'}</button> <button class="btn sm red" type="button" onclick="deleteProblemStatementFile('${item.id}')">Delete</button></div>`).join('')||'<p class="glass">No problem statement files have been added yet.</p>';
  return `<div class="admin-problem-files"><h3 style="margin:0 0 12px">TRACK & PROBLEM STATEMENT FILES</h3><form class="glass" onsubmit="return saveProblemStatementFile(event)"><h3>${current?'Edit Problem Statement':'Add Problem Statement'}</h3><div class="two"><label>Track Name<input name="track" list="problem-track-options" value="${esc(current?.track||'')}" required><datalist id="problem-track-options">${trackNames.map(name=>`<option value="${esc(name)}">`).join('')}</datalist></label>${F('Problem Statement Title','title',current?.title||'')}</div><label>Problem Statement Description<textarea name="description" required>${esc(current?.description||'')}</textarea></label><label>Upload Problem Statement File${current?` (leave blank to keep ${esc(current.fileName)})`:''}<input id="problemStatementFile" name="file" type="file" accept="${accept}" ${current?'':'required'}></label>${current?`<label>Status<select name="active"><option value="true" ${current.active?'selected':''}>Active</option><option value="false" ${current.active?'':'selected'}>Inactive</option></select></label>`:''}<button class="btn">${current?'Save Changes':'Save Problem Statement'}</button>${current?` <button class="btn ghost" type="button" onclick="adm.editProblemFileId='';view()">Cancel</button>`:''}</form><h3 style="margin:20px 0 10px">Uploaded Problem Statement Files</h3>${records}</div>`;
 }
 function allowedProblemFile(file){const extension=file.name.split('.').pop()?.toLowerCase()||'';return PROBLEM_FILE_EXTENSIONS.includes(extension)}
@@ -836,16 +1137,33 @@ function saveProblemStatementFile(ev){
  if(!track||!title||!description){toast('Enter the track, problem statement title, and description.');return false}
  if(!existing&&!file){toast('Select a problem statement file to upload.');return false}
  if(file&&!allowedProblemFile(file)){toast('Supported files: PDF, DOC, DOCX, PPT, PPTX, and ZIP.');return false}
+ if(file&&file.size>2*1024*1024){toast('Problem statement file exceeds the maximum allowed size of 2 MB.');return false}
  if(db.problemStatementFiles.some(item=>item.id!==existing?.id&&item.track===track&&item.title===title)){toast('This problem statement already exists for that track.');return false}
- const persist=(fileData)=>{
+ const persist=async(fileData)=>{
   const oldRecords=db.problemStatementFiles.slice(),oldStatement=existing?{...existing}:null,oldTracks=db.tracks.map(item=>({name:item.name,problems:[...item.problems]}));
+  const statementId=existing?.id||globalThis.crypto?.randomUUID?.()||('ps-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+  const fileName=file?file.name:(existing?.fileName||'');
+  const fileType=file?file.name.split('.').pop().toUpperCase():(existing?.fileType||'');
+
+  if(file&&fileData){
+    try{
+      await uploadProblemStatementFileContent(statementId,{fileName,fileType,fileData});
+    }catch(uploadErr){
+      console.error('Problem statement file upload failed:',uploadErr);
+      toast('Failed to upload problem statement file: '+uploadErr.message);
+      return;
+    }
+  }
+
   try{
-   const statement=existing||{id:globalThis.crypto?.randomUUID?.()||`ps-${Date.now()}-${Math.random().toString(36).slice(2)}`,uploadDate:'',fileName:'',fileType:'',fileData:'',active:true};
+   const statement=existing||{id:statementId,uploadDate:'',fileName:'',fileType:'',active:true};
    Object.assign(statement,{track,title,description});
    if(existing)statement.active=data.active==='true';
-   if(file){statement.fileData=fileData;statement.fileName=file.name;statement.fileType=file.name.split('.').pop().toUpperCase();statement.uploadDate=new Date().toISOString().slice(0,10)}
+   if(file){statement.fileName=fileName;statement.fileType=fileType;statement.uploadDate=new Date().toISOString().slice(0,10)}
+   delete statement.fileData;
    if(!existing)db.problemStatementFiles.push(statement);
-   addProblemToTrack(track,title);save();adm.editProblemFileId='';view();toast('Problem statement file saved.');
+   addProblemToTrack(track,title);save();adm.editProblemFileId='';view();
+   publishEventDataToBackend().then(()=>{toast('Problem statement file saved and published to server. ✓');}).catch(err=>toast('Saved locally, but server metadata update failed: '+err.message));
   }catch(error){
    if(existing)Object.assign(existing,oldStatement);
    db.problemStatementFiles=oldRecords;db.tracks=oldTracks;
@@ -853,7 +1171,7 @@ function saveProblemStatementFile(ev){
   }
  };
  if(file){const reader=new FileReader();reader.onload=()=>{if(typeof reader.result!=='string'){toast('The selected file could not be read.');return}persist(reader.result)};reader.onerror=()=>toast('The selected file could not be read.');reader.readAsDataURL(file)}
- else persist(existing.fileData);
+ else persist(null);
  return false;
 }
 function editProblemStatementFile(id){if(ses?.role!=='admin')return;adm.editProblemFileId=id;view();setTimeout(()=>document.querySelector('.admin-problem-files')?.scrollIntoView({behavior:'smooth'}),0)}
@@ -861,29 +1179,44 @@ function replaceProblemStatementFile(ev,id){
  if(ses?.role!=='admin'){toast('Admin access is required.');return}
  const file=ev.target.files[0],statement=db.problemStatementFiles.find(item=>item.id===id);if(!file||!statement)return;
  if(!allowedProblemFile(file)){toast('Supported files: PDF, DOC, DOCX, PPT, PPTX, and ZIP.');ev.target.value='';return}
- const reader=new FileReader();reader.onload=()=>{
+ if(file.size>2*1024*1024){toast('Problem statement file exceeds the maximum allowed size of 2 MB.');ev.target.value='';return}
+ const reader=new FileReader();reader.onload=async()=>{
   if(typeof reader.result!=='string'){toast('The selected file could not be read.');return}
-  const old={fileData:statement.fileData,fileName:statement.fileName,fileType:statement.fileType,uploadDate:statement.uploadDate};
-  try{statement.fileData=reader.result;statement.fileName=file.name;statement.fileType=file.name.split('.').pop().toUpperCase();statement.uploadDate=new Date().toISOString().slice(0,10);save();view();toast('Problem statement file replaced.')}
-  catch(error){Object.assign(statement,old);console.error('Could not replace problem statement file:',error);toast('Could not replace the file. Browser storage may be full; try a smaller file.')}
+  const newFileName=file.name;
+  const newFileType=file.name.split('.').pop().toUpperCase();
+  try{
+    await uploadProblemStatementFileContent(statement.id,{fileName:newFileName,fileType:newFileType,fileData:reader.result});
+  }catch(uploadErr){
+    console.error('Replacing problem statement file upload failed:',uploadErr);
+    toast('Failed to upload replaced file: '+uploadErr.message);
+    return;
+  }
+  const old={fileName:statement.fileName,fileType:statement.fileType,uploadDate:statement.uploadDate};
+  try{
+    statement.fileName=newFileName;
+    statement.fileType=newFileType;
+    statement.uploadDate=new Date().toISOString().slice(0,10);
+    delete statement.fileData;
+    save();view();
+    publishEventDataToBackend().then(()=>{toast('Problem statement file replaced and published to server. ✓');}).catch(err=>toast('Replaced locally, but server metadata update failed: '+err.message));
+  }catch(error){Object.assign(statement,old);console.error('Could not replace problem statement file:',error);toast('Could not replace the file. Browser storage may be full; try a smaller file.')}
  };
  reader.onerror=()=>toast('The selected file could not be read.');reader.readAsDataURL(file);
 }
-function toggleProblemStatementFile(id){if(ses?.role!=='admin'){toast('Admin access is required.');return}const item=db.problemStatementFiles.find(record=>record.id===id);if(!item)return;item.active=!item.active;try{save();view()}catch(error){item.active=!item.active;console.error('Could not update problem statement status:',error);toast('Could not update the file status.')}}
-function deleteProblemStatementFile(id){if(ses?.role!=='admin'){toast('Admin access is required.');return}if(!confirm('Delete this problem statement file?'))return;const index=db.problemStatementFiles.findIndex(item=>item.id===id);if(index<0)return;const [removed]=db.problemStatementFiles.splice(index,1);try{save();view();toast('Problem statement file deleted.')}catch(error){db.problemStatementFiles.splice(index,0,removed);console.error('Could not delete problem statement file:',error);toast('Could not delete the file.')}}
+function toggleProblemStatementFile(id){if(ses?.role!=='admin'){toast('Admin access is required.');return}const item=db.problemStatementFiles.find(record=>record.id===id);if(!item)return;item.active=!item.active;save();view();publishEventDataToBackend().then(()=>toast('Problem statement status updated on server. ✓')).catch(err=>toast('Updated locally, but server update failed: '+err.message));}
+function deleteProblemStatementFile(id){if(ses?.role!=='admin'){toast('Admin access is required.');return}if(!confirm('Delete this problem statement file?'))return;const index=db.problemStatementFiles.findIndex(item=>item.id===id);if(index<0)return;const [removed]=db.problemStatementFiles.splice(index,1);save();view();publishEventDataToBackend().then(()=>toast('Problem statement file deleted from server. ✓')).catch(err=>toast('Deleted locally, but server update failed: '+err.message));}
 function adminPg(){
   if(ses?.role!=='admin'){go('login');return ''}
-  // Async verify server session cookie & sync teams
-  fetch('/api/admin/me',{credentials:'include'}).then(r=>r.json()).then(data=>{
-    if(!data.authenticated){
-      toast('Admin session expired. Please log in again.');
-      logout();
-    } else {
-      syncAdminTeamsFromBackend();
-    }
-  }).catch(()=>{});
+  if(adminSessionStatus==='unknown'){
+    verifyAdminSession().then(authenticated=>{
+      if(authenticated&&!adminTeamsSyncAttempted){adminTeamsSyncAttempted=true;syncAdminTeamsFromBackend()}
+      if(location.hash==='#/admin'&&ses?.role==='admin')view();
+    });
+  }else if(adminSessionStatus==='verified'&&!adminTeamsSyncAttempted){
+    adminTeamsSyncAttempted=true;syncAdminTeamsFromBackend();
+  }
   const T=db.teams,tabs=['overview','event','payment-qr','teams','accounts','announcements','problem-files'],tabLabels={'payment-qr':'Payment QR','problem-files':'Track & Problem Statement Files'};
- let h=`<section><h2>Admin Dashboard</h2><div class="tabs">${tabs.map(t=>`<button class="btn ${adm.tab==t?'on':''}" onclick="adm.tab='${t}';view()">${tabLabels[t]||t[0].toUpperCase()+t.slice(1)}</button>`).join('')}</div>`;
+ let h=`<section><h2>Admin Dashboard</h2>${adminSessionStatus==='unavailable'?'<p class="err">Could not verify the admin session. Your local dashboard data is preserved. <button class="btn sm" type="button" onclick="retryAdminSession()">Retry verification</button></p>':''}<div class="tabs">${tabs.map(t=>`<button class="btn ${adm.tab==t?'on':''}" onclick="adm.tab='${t}';view()">${tabLabels[t]||t[0].toUpperCase()+t.slice(1)}</button>`).join('')}<button class="btn ghost" type="button" onclick="refreshAdminTeams()" ${adminTeamsSyncPromise?'disabled':''}>Refresh teams</button></div>`;
  if(adm.tab=='overview')h+=`<div class="grid">${[['Total Teams',T.length],['Participants',T.reduce((n,t)=>n+1+t.members.length,0)],['Payment Completed',T.filter(t=>t.pay.status=='Paid').length],['Pending Payments',T.filter(t=>t.pay.status!='Paid').length],['Active Accounts',T.filter(t=>t.acc.enabled).length]].map(([l,n])=>`<div class="glass stat"><b>${n}</b>${l}</div>`).join('')}</div>`;
  if(adm.tab=='event'){const e=db.event;h+=`<form class="glass" onsubmit="return saveEv(event)"><div class="two">${['title','date','time','venue','contact'].map(k=>`<label>${k[0].toUpperCase()+k.slice(1)}<input name="${k}" type="${k=='date'?'date':'text'}" value="${esc(e[k])}"></label>`).join('')}</div><p class="payment-pending-note">Registration is fixed at ₹500 per participant. The final team total is calculated from the selected team size.</p><label>Description<textarea name="about">${esc(e.about)}</textarea></label>
   ${Object.entries(ALIST).map(([k,[a,b,l]])=>`<label>${l} – one per line<textarea name="${k}">${esc(lines(db[k],x=>x.t+' | '+x.d))}</textarea></label>`).join('')}
@@ -896,44 +1229,162 @@ function adminPg(){
   h+=`<input placeholder="Search teams and participants…" value="${esc(adm.q)}" oninput="adm.q=this.value;view()" style="margin-bottom:10px"><div class="admin-team-filters"><label>Team size<select onchange="adm.teamSize=this.value;view()"><option value="">All team sizes</option>${[2,3,4].map(size=>`<option value="${size}" ${adm.teamSize===String(size)?'selected':''}>${size} members</option>`).join('')}</select></label><label>Payment status<select onchange="adm.payStatus=this.value;view()"><option value="">All payment statuses</option>${['Pending','Paid','Rejected'].map(status=>`<option value="${status}" ${adm.payStatus===status?'selected':''}>${status}</option>`).join('')}</select></label></div>
   <div class="glass"><table><thead><tr><th>ID<th>Team<th>Leader<th>Team size<th>Participants<th>Total fee<th>Registered<th>Transaction reference<th>Payment<th>Status<th>Account<th></tr></thead><tbody>${L.map(t=>`<tr><td data-l="ID">${esc(t.id)}<td data-l="Team">${esc(t.name)}<td data-l="Leader">${esc(t.leader)}<td data-l="Team size">${Number(t.teamSize)||1+(t.members?.length||0)}<td data-l="Participants" class="admin-participants">${renderParticipantDetails(t)}<td data-l="Total fee">${formatRupees(t.totalAmount||((Number(t.teamSize)||1+(t.members?.length||0))*500))}<td data-l="Registered">${t.createdAt?esc(new Date(t.createdAt).toLocaleString('en-IN')):'—'}<td data-l="Transaction reference">${esc(t.pay?.utr||'—')}<td data-l="Payment">${badge(t.pay?.status||'Pending')}<td data-l="Status">${badge(t.status||'Pending')}<td data-l="Account">${badge(t.acc?.enabled?'Enabled':'Disabled')}<td data-l="Actions"><button class="btn sm" onclick="editTeam('${esc(t.id)}')">Edit</button> <button class="btn sm red" onclick="delTeam('${esc(t.id)}')">Del</button></tr>`).join('')||'<tr><td colspan="12">No teams found.</td></tr>'}</tbody></table></div>`;
  }
- if(adm.tab=='accounts')h+=`<div class="glass"><table><thead><tr><th>Team ID<th>Leader<th>User ID<th>Password<th>Status<th></tr></thead><tbody>${T.map(t=>`<tr><td data-l="Team ID">${t.id}<td data-l="Leader">${esc(t.leader)}<td data-l="User ID">${esc(t.acc.userId)}<td data-l="Password">${esc(t.acc.password)}<td data-l="Status">${badge(t.acc.enabled?'Enabled':'Disabled')}<td><button class="btn sm" onclick="editAcc('${t.id}')">Edit</button> <button class="btn sm ghost" onclick="toggleAcc('${t.id}')">${t.acc.enabled?'Disable':'Enable'}</button></tr>`).join('')||'<tr><td>No accounts yet.</tr>'}</tbody></table></div><button class="btn" style="margin-top:14px" onclick="newTeam()">+ Create team & account</button>`;
- if(adm.tab=='announcements')h+=`<form class="glass" onsubmit="return addAnn(event)">${F('Title','t')}<label>Message<textarea name="d" required></textarea></label><button class="btn">Post announcement</button></form>${db.announcements.map((a,i)=>`<div class="glass" style="margin-top:10px"><b>${esc(a.t)}</b><p>${esc(a.d)}</p><button class="btn sm red" onclick="db.announcements.splice(${i},1);save();view()">Delete</button></div>`).join('')}`;
+ if(adm.tab=='accounts')h+=`<div class="glass"><table><thead><tr><th>Team ID<th>Leader<th>User ID<th>Password<th>Status<th></tr></thead><tbody>${T.map(t=>`<tr><td data-l="Team ID">${t.id}<td data-l="Leader">${esc(t.leader)}<td data-l="User ID">${esc(t.acc?.userId||t.leader)}<td data-l="Password"><span style="color:var(--mu);font-size:12px">Protected (bcrypt)</span><td data-l="Status">${badge(t.acc?.enabled?'Enabled':'Disabled')}<td><button class="btn sm" onclick="editAcc('${t.id}')">Edit</button> <button class="btn sm ghost" onclick="toggleAcc('${t.id}')">${t.acc?.enabled?'Disable':'Enable'}</button></tr>`).join('')||'<tr><td>No accounts yet.</tr>'}</tbody></table></div><button class="btn" style="margin-top:14px" onclick="newTeam()">+ Create team & account</button>`;
+ if(adm.tab=='announcements')h+=`<form class="glass" onsubmit="return addAnn(event)">${F('Title','t')}<label>Message<textarea name="d" required></textarea></label><button class="btn">Post announcement</button></form>${db.announcements.map((a,i)=>`<div class="glass" style="margin-top:10px"><b>${esc(a.t)}</b><p>${esc(a.d)}</p><button class="btn sm red" onclick="delAnn(${i})">Delete</button></div>`).join('')}`;
  if(adm.tab=='payment-qr')h+=paymentQrAdmin();
  if(adm.tab=='problem-files')h+=problemStatementFilesAdmin();
  return h+'</section>'}
-function saveEv(ev){ev.preventDefault();const f=Object.fromEntries(new FormData(ev.target));['title','date','time','venue','contact','about'].forEach(k=>db.event[k]=f[k]);
- Object.keys(ALIST).forEach(k=>db[k]=parse(f[k],['t','d']));const editedTracks=parse(f.tracks,['name','p']).map(t=>({name:t.name,problems:t.p.split(';').map(x=>x.trim()).filter(Boolean)}));
- for(const item of db.problemStatementFiles){let track=editedTracks.find(t=>t.name===item.track);if(!track){track={name:item.track,problems:[]};editedTracks.push(track)}if(!track.problems.includes(item.title))track.problems.push(item.title)}
- db.tracks=editedTracks;save();toast('Saved');return false}
-function addAnn(ev){ev.preventDefault();db.announcements.unshift(Object.fromEntries(new FormData(ev.target)));save();view();return false}
-function editTeam(id){const t=db.teams.find(x=>x.id==id);openModal(`<h3>Edit ${t.id}</h3><form onsubmit="return saveTeam(event,'${id}')"><div class="two">${[['Team Name','name'],['Leader','leader'],['Mobile','mobile'],['Email','email'],['College','college'],['Department','department'],['Year','year'],['Project Title','title']].map(([l,k])=>F(l,k,t[k])).join('')}
+async function verifyAdminSession(){
+ if(ses?.role!=='admin')return false;
+ if(adminSessionStatus==='verified')return true;
+ if(adminSessionStatus==='checking')return adminSessionPromise;
+ if(adminSessionStatus!=='unknown')return false;
+ adminSessionStatus='checking';
+ adminSessionPromise=(async()=>{
+  try{
+   const res=await fetch('/api/admin/me',{credentials:'include'});
+   const data=await res.json();
+   if(res.status===401||(res.ok&&data.authenticated===false)){
+    adminSessionStatus='expired';toast('Admin session expired. Please log in again.');logout();return false;
+   }
+   if(!res.ok)throw new Error(data.message||'Admin session verification failed.');
+   adminSessionStatus='verified';return true;
+  }catch(error){
+   adminSessionStatus='unavailable';console.warn('Could not verify admin session:',error.message);return false;
+  }finally{adminSessionPromise=null}
+ })();
+ return adminSessionPromise;
+}
+async function retryAdminSession(){
+ if(ses?.role!=='admin')return;
+ adminSessionStatus='unknown';
+ const authenticated=await verifyAdminSession();
+ if(authenticated&&!adminTeamsSyncAttempted){adminTeamsSyncAttempted=true;await syncAdminTeamsFromBackend()}
+ view();
+}
+async function refreshAdminTeams(){
+ if(ses?.role!=='admin')return;
+ if(adminSessionStatus!=='verified'){
+  adminSessionStatus='unknown';
+  if(!await verifyAdminSession()){view();return}
+ }
+ adminTeamsSyncAttempted=true;
+ await syncAdminTeamsFromBackend();
+}
+async function saveEv(ev){
+  ev.preventDefault();
+  const f=Object.fromEntries(new FormData(ev.target));
+  ['title','date','time','venue','contact','about'].forEach(k=>db.event[k]=f[k]);
+  Object.keys(ALIST).forEach(k=>db[k]=parse(f[k],['t','d']));
+  const editedTracks=parse(f.tracks,['name','p']).map(t=>({name:t.name,problems:t.p.split(';').map(x=>x.trim()).filter(Boolean)}));
+  for(const item of db.problemStatementFiles){
+    let track=editedTracks.find(t=>t.name===item.track);
+    if(!track){track={name:item.track,problems:[]};editedTracks.push(track)}
+    if(!track.problems.includes(item.title))track.problems.push(item.title)
+  }
+  db.tracks=editedTracks;
+  save();
+  view();
+  toast('Saving event data to server…');
+  try{
+    await publishEventDataToBackend();
+    toast('Event data saved and published live! ✓');
+  }catch(err){
+    console.error('Error publishing event data:',err);
+    toast('Saved locally, but server update failed: '+err.message);
+  }
+  return false;
+}
+async function addAnn(ev){
+  ev.preventDefault();
+  db.announcements.unshift(Object.fromEntries(new FormData(ev.target)));
+  save();
+  view();
+  toast('Posting announcement to server…');
+  try{
+    await publishEventDataToBackend();
+    toast('Announcement posted live! ✓');
+  }catch(err){
+    console.error('Error publishing announcement:',err);
+    toast('Saved locally, but server update failed: '+err.message);
+  }
+  return false;
+}
+async function delAnn(index){
+  db.announcements.splice(index,1);
+  save();
+  view();
+  toast('Deleting announcement from server…');
+  try{
+    await publishEventDataToBackend();
+    toast('Announcement deleted from server! ✓');
+  }catch(err){
+    console.error('Error deleting announcement:',err);
+    toast('Deleted locally, but server update failed: '+err.message);
+  }
+}
+async function viewPaymentScreenshot(id){
+ const container=$('#screenshot-preview-container');
+ if(container){
+  container.innerHTML='<p style="color:var(--mu)">Loading screenshot…</p>';
+ }
+ try{
+  const res=await fetch(`/api/admin/teams/${encodeURIComponent(id)}/screenshot`,{credentials:'include'});
+  const data=await res.json();
+  if(!res.ok||!data.success||!data.shot){
+   throw new Error(data.message||'Failed to load payment screenshot.');
+  }
+  const t=db.teams.find(x=>x.id==id);
+  if(t)t.pay.shot=data.shot;
+  if(container){
+   container.innerHTML=`<div style="margin-top:10px"><a href="${data.shot}" target="_blank" rel="noopener noreferrer" style="color:var(--c1);display:inline-block;margin-bottom:8px">Open full screenshot in new tab</a><br><img src="${data.shot}" alt="Payment screenshot for ${esc(id)}" style="max-width:100%;max-height:360px;border-radius:8px;border:1px solid rgba(255,255,255,0.15)"></div>`;
+  }else{
+   window.open(data.shot,'_blank');
+  }
+ }catch(err){
+  if(container){
+   container.innerHTML=`<p class="err" style="margin-top:8px">${esc(err.message)}</p>`;
+  }else{
+   alert(err.message);
+  }
+ }
+}
+function editTeam(id){
+ const t=db.teams.find(x=>x.id==id);
+ if(!t){alert('Team not found: '+id);return;}
+ const hasProof=Boolean(t.pay?.hasShot||t.pay?.shot);
+ openModal(`<h3>Edit ${t.id}</h3><form onsubmit="return saveTeam(event,'${id}')"><div class="two">${[['Team Name','name'],['Leader','leader'],['Mobile','mobile'],['Email','email'],['College','college'],['Department','department'],['Year','year'],['Project Title','title']].map(([l,k])=>F(l,k,t[k]||'')).join('')}
  <label>Track<select id="editTrack" name="track" onchange="refreshAdminProblems(this.value)">${trackOptions(t.track,true)}</select></label><label>Problem Statement<select id="editProblem" name="problem">${problemOptions(t.track,t.problem,true)}</select></label>
- <label>Payment Status<select name="ps">${['Pending','Paid','Rejected'].map(x=>`<option ${t.pay.status==x?'selected':''}>${x}</option>`).join('')}</select></label><label>Registration Status<select name="st">${['Pending','Approved','Rejected'].map(x=>`<option ${t.status==x?'selected':''}>${x}</option>`).join('')}</select></label>${F('UTR','utr',t.pay.utr)}</div>
- <label>Description<textarea name="desc">${esc(t.desc)}</textarea></label><label>Additional members (one per line: Name | Email | Mobile | College | Department | Year)<textarea name="mem">${esc(lines(t.members,m=>{if(!m)return'';if(typeof m==='string')return m;return[m.name||'',m.email||'',m.mobile||'',m.college||'',m.department||'',m.year||''].join(' | ')}))}</textarea></label>
- ${t.pay.shot?`<a href="${t.pay.shot}" target="_blank" style="color:var(--c1)">View payment screenshot</a><br><br>`:''}<button class="btn">Save</button> <button type="button" class="btn ghost" onclick="closeModal()">Cancel</button></form>`)}
+ <label>Payment Status<select name="ps">${['Pending','Paid','Rejected'].map(x=>`<option ${(t.pay?.status||'Pending')==x?'selected':''}>${x}</option>`).join('')}</select></label><label>Registration Status<select name="st">${['Pending','Approved','Rejected'].map(x=>`<option ${(t.status||'Pending')==x?'selected':''}>${x}</option>`).join('')}</select></label>${F('UTR','utr',t.pay?.utr||'')}</div>
+ <label>Description<textarea name="desc">${esc(t.desc||'')}</textarea></label><label>Additional members (one per line: Name | Email | Mobile | College | Department | Year)<textarea name="mem">${esc(lines(t.members||[],m=>{if(!m)return'';if(typeof m==='string')return m;return[m.name||'',m.email||'',m.mobile||'',m.college||'',m.department||'',m.year||''].join(' | ')}))}</textarea></label>
+ ${hasProof?`<div style="margin-bottom:14px"><button type="button" class="btn sm ghost" onclick="viewPaymentScreenshot('${esc(t.id)}')">View payment screenshot</button><div id="screenshot-preview-container"></div></div>`:''}<button class="btn">Save</button> <button type="button" class="btn ghost" onclick="closeModal()">Cancel</button></form>`);
+}
 async function syncAdminTeamsFromBackend(){
-  if(ses?.role!=='admin')return;
+  if(ses?.role!=='admin'||adminSessionStatus!=='verified')return;
+  if(adminTeamsSyncPromise)return adminTeamsSyncPromise;
+  adminTeamsSyncPromise=(async()=>{
   try{
     const res=await fetch('/api/admin/teams',{credentials:'include'});
+    if(res.status===401){adminSessionStatus='expired';toast('Admin session expired. Please log in again.');logout();return}
+    if(!res.ok)throw new Error(`Team refresh failed (${res.status}).`);
     const data=await res.json();
-    if(res.ok && data.success && Array.isArray(data.data)){
-      if(data.data.length>0){
-        db.teams=data.data;
+    if(!data.success||!Array.isArray(data.data))throw new Error('The server returned an invalid team list.');
+    let teams=data.data;
+    if(teams.length){
+      if(JSON.stringify(db.teams)!==JSON.stringify(teams)){
+        db.teams=teams;
         save();
-        view();
-      } else if(db.teams.length>0){
-        // Migrate legacy localStorage teams to MongoDB
-        try{
-          await fetch('/api/admin/teams/migrate',{
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            credentials:'include',
-            body:JSON.stringify({teams:db.teams})
-          });
-        }catch(e){}
+        if(!hasUnsavedAdminChanges()&&location.hash==='#/admin')view();
+        else toast('Latest team data was loaded. Your open form was left unchanged.');
       }
     }
-  }catch(e){console.warn('Backend team sync offline:',e.message);}
+  }catch(error){console.warn('Backend team sync failed; local team data was preserved:',error.message);toast('Could not refresh teams. Existing local data was preserved.')}
+  })();
+  try{return await adminTeamsSyncPromise}
+  finally{adminTeamsSyncPromise=null}
+}
+function hasUnsavedAdminChanges(){
+ return Boolean($('#app form')||(!$('#modal')?.classList.contains('hide'))||pendingQrDataUrl);
 }
 
 async function saveTeam(ev,id){
@@ -986,20 +1437,22 @@ async function toggleAcc(id){
   }catch(err){console.warn('Backend toggle acc offline, updating locally:',err.message);}
   t.acc.enabled=newEnabled;save();view();
 }
-function editAcc(id){const t=db.teams.find(x=>x.id==id);openModal(`<h3>Account ${t.id}</h3><form onsubmit="return saveAcc(event,'${id}')">${F('Team ID','id',t.id)}${F('Leader Name','leader',t.leader)}${F('User ID','uid',t.acc.userId)}${F('Mobile','mobile',t.mobile)}${F('Password (reset here)','pw',t.acc.password||t.mobile)}<button class="btn">Save</button> <button type="button" class="btn ghost" onclick="closeModal()">Cancel</button></form>`)}
+function editAcc(id){const t=db.teams.find(x=>x.id==id);openModal(`<h3>Account ${t.id}</h3><form onsubmit="return saveAcc(event,'${id}')">${F('Team ID','id',t.id)}${F('Leader Name','leader',t.leader)}${F('User ID','uid',t.acc?.userId||t.leader)}${F('Mobile','mobile',t.mobile)}<label>New Password (leave blank to keep current)<input name="pw" type="password" placeholder="Enter new password"></label><button class="btn">Save</button> <button type="button" class="btn ghost" onclick="closeModal()">Cancel</button></form>`)}
 async function saveAcc(ev,id){
   ev.preventDefault();
   const f=Object.fromEntries(new FormData(ev.target)),t=db.teams.find(x=>x.id==id);
   if(f.id!=id&&db.teams.some(x=>x.id==f.id)){alert('Team ID already exists');return false}
+  const payload={leader:f.leader,mobile:f.mobile};
+  if(f.pw&&String(f.pw).trim()){payload.password=String(f.pw).trim()}
   try{
     await fetch(`/api/admin/teams/${id}`,{
       method:'PUT',
       headers:{'Content-Type':'application/json'},
       credentials:'include',
-      body:JSON.stringify({leader:f.leader,mobile:f.mobile,password:f.pw})
+      body:JSON.stringify(payload)
     });
   }catch(err){console.warn('Backend save acc offline, updating locally:',err.message);}
-  t.id=f.id;t.leader=f.leader;t.mobile=f.mobile;t.acc.userId=f.uid;t.acc.password=f.pw;save();closeModal();view();return false;
+  t.id=f.id;t.leader=f.leader;t.mobile=f.mobile;t.acc.userId=f.uid;save();closeModal();view();return false;
 }
 function newTeam(){openModal(`<h3>Create team & account</h3><form onsubmit="return mkTeam(event)">${F('Team Name','name')}${F('Leader Name','leader')}${F('Leader Mobile','mobile','','tel',MOB)}<button class="btn">Create</button> <button type="button" class="btn ghost" onclick="closeModal()">Cancel</button></form>`)}
 async function mkTeam(ev){
@@ -1013,7 +1466,7 @@ async function mkTeam(ev){
       body:JSON.stringify({team:f.name,leader:f.leader,mobile:f.mobile,email:`${f.leader.replace(/\s+/g,'').toLowerCase()}@sample.com`,utr:'ADMIN_CREATED'})
     });
   }catch(err){}
-  db.teams.push({id:newTeamId,name:f.name,leader:f.leader,mobile:f.mobile,email:'',college:'',year:'',members:[],track:'',problem:'',title:'',desc:'',pay:{method:'',utr:'',shot:'',status:'Pending'},status:'Pending',acc:{userId:f.leader,password:f.mobile,enabled:false}});
+  db.teams.push({id:newTeamId,name:f.name,leader:f.leader,mobile:f.mobile,email:'',college:'',year:'',members:[],track:'',problem:'',title:'',desc:'',pay:{method:'',utr:'',shot:'',status:'Pending'},status:'Pending',acc:{userId:f.leader,enabled:false}});
   save();closeModal();view();return false;
 }
 /* ---------- router ---------- */
@@ -1038,9 +1491,13 @@ function playHomeIntro(){
  };
  setTimeout(finishIntro,2200);
 }
+function eventSyncBanner(){
+  if(eventSyncStatus!=='error')return '';
+  return `<div class="event-sync-error-banner" style="background:rgba(239,68,68,.15);border:1px solid #ef4444;color:#fca5a5;padding:10px 16px;border-radius:8px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px"><span>⚠️ <b>Connection Error:</b> ${esc(eventSyncError||'Failed to load live event data. Displaying cached data.')}</span><button class="btn sm" type="button" onclick="syncEventDataOnLoad()">Retry</button></div>`;
+}
 function view(){chrome();const r=(location.hash.slice(2)||'home');
- $('#app').innerHTML=({home,register,login:loginPg,team:teamPg,admin:adminPg}[r]||home)();tick();initScrollReveal()}
-addEventListener('hashchange',()=>{scrollTo(0,0);view();playHomeIntro()});initAmbientEffects();playHomeIntro();view();syncPaymentSettingsOnLoad();
+ $('#app').innerHTML=eventSyncBanner()+({home,register,login:loginPg,team:teamPg,admin:adminPg}[r]||home)();tick();initScrollReveal()}
+addEventListener('hashchange',()=>{scrollTo(0,0);view();playHomeIntro()});initAmbientEffects();playHomeIntro();view();syncEventDataOnLoad();syncPaymentSettingsOnLoad();
 
 /* ---------- PAYMENT QR & AMOUNT ADMIN MANAGEMENT ---------- */
 let pendingQrFile = null;
@@ -1141,13 +1598,117 @@ async function handleAdminConfirmSubmit(ev) {
   return false;
 }
 
+function compressQrImage(file) {
+  return new Promise(async (resolve, reject) => {
+    const ext = (file.name || '').split('.').pop()?.toLowerCase();
+    if (['heic', 'heif'].includes(ext) || file.type === 'image/heic' || file.type === 'image/heif') {
+      return reject(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
+    }
+
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
+    }, 10000);
+
+    function finish(err, result) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      if (err) reject(err);
+      else resolve(result);
+    }
+
+    // 1. Try createImageBitmap
+    if (typeof createImageBitmap === 'function') {
+      try {
+        const bmp = await createImageBitmap(file);
+        const maxDim = 800;
+        let width = bmp.width, height = bmp.height;
+        if (width > maxDim || height > maxDim) {
+          if (width >= height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(bmp, 0, 0, width, height);
+        try { bmp.close(); } catch (e) {}
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+        if (dataUrl.length > 680000) {
+          return finish(new Error('Compressed QR image exceeds 500 KB. Please choose a simpler or smaller image.'));
+        }
+        return finish(null, dataUrl);
+      } catch (bmpErr) {}
+    }
+
+    // 2. Fallback to Image() with object URL
+    let objectUrl = '';
+    try {
+      objectUrl = URL.createObjectURL(file);
+    } catch (e) {
+      return finish(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
+    }
+
+    const img = new Image();
+    const cleanup = () => {
+      if (objectUrl) {
+        try { URL.revokeObjectURL(objectUrl); } catch (e) {}
+        objectUrl = '';
+      }
+    };
+
+    img.onerror = () => {
+      cleanup();
+      finish(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
+    };
+
+    img.onload = () => {
+      try {
+        const maxDim = 800;
+        let width = img.width, height = img.height;
+        if (width > maxDim || height > maxDim) {
+          if (width >= height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        cleanup();
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+        if (dataUrl.length > 680000) {
+          return finish(new Error('Compressed QR image exceeds 500 KB. Please choose a simpler or smaller image.'));
+        }
+        finish(null, dataUrl);
+      } catch (err) {
+        cleanup();
+        finish(new Error('Failed to compress QR image: ' + err.message));
+      }
+    };
+
+    img.src = objectUrl;
+  });
+}
+
 function handleQrFileSelect(ev) {
   const file = ev.target.files?.[0];
   if (!file) return;
-  const allowed = ['image/png', 'image/jpeg', 'image/jpg'];
+  const allowed = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
   const ext = file.name.split('.').pop()?.toLowerCase();
-  if (!allowed.includes(file.type) && !['png', 'jpg', 'jpeg'].includes(ext)) {
-    toast('Only PNG, JPG, and JPEG images are allowed.');
+  if (!allowed.includes(file.type) && !['png', 'jpg', 'jpeg', 'webp'].includes(ext)) {
+    toast('Only PNG, JPG, JPEG, and WEBP images are allowed.');
     ev.target.value = '';
     return;
   }
@@ -1156,26 +1717,17 @@ function handleQrFileSelect(ev) {
     ev.target.value = '';
     return;
   }
-  const reader = new FileReader();
-  reader.onload = () => {
-    const dataUrl = reader.result;
-    const testImg = new Image();
-    testImg.onload = () => {
-      pendingQrFile = file;
-      pendingQrDataUrl = dataUrl;
-      view();
-      toast('New QR image selected. Review preview and click "Save New QR".');
-    };
-    testImg.onerror = () => {
-      toast('The selected file is not a valid, readable image.');
-      pendingQrFile = null;
-      pendingQrDataUrl = '';
-      ev.target.value = '';
-    };
-    testImg.src = dataUrl;
-  };
-  reader.onerror = () => toast('Could not read the selected image file.');
-  reader.readAsDataURL(file);
+  compressQrImage(file).then(dataUrl => {
+    pendingQrFile = file;
+    pendingQrDataUrl = dataUrl;
+    view();
+    toast('QR image compressed and ready. Review preview and click "Save New QR".');
+  }).catch(err => {
+    toast(err.message || 'Could not process QR image.');
+    pendingQrFile = null;
+    pendingQrDataUrl = '';
+    ev.target.value = '';
+  });
 }
 
 function cancelPendingQr() {
@@ -1369,7 +1921,7 @@ function paymentQrAdmin() {
 
           <div style="width:100%;border-top:1px solid var(--bd);padding-top:16px;margin-top:8px">
             <h4>Select Replacement QR</h4>
-            <p style="font-size:12px;color:var(--mu);margin-bottom:10px">Accepts PNG, JPG, or JPEG (max 2.5MB)</p>
+            <p style="font-size:12px;color:var(--mu);margin-bottom:10px">Accepts PNG, JPG, JPEG, or WEBP up to 2.5MB (automatically resized to max 800px, under 500 KB)</p>
             <label class="btn sm" style="display:inline-block;cursor:pointer">
               Choose File
               <input type="file" accept="image/png,image/jpeg,image/jpg" hidden onchange="handleQrFileSelect(event)">

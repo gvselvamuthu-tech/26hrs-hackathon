@@ -6,3 +6,6 @@ node_modules/
 _backup/
 *.bak
 *.bak*
+test-tools/
+screenshots/
+*.log

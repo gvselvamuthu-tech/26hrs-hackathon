@@ -10,6 +10,7 @@ const bcrypt = require("bcryptjs");
 const { validateRegistrationPayload, RegistrationValidationError } = require("./lib/registration");
 
 const app = express();
+app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3000;
 
 // Simple cookie parser helper
@@ -27,39 +28,91 @@ function parseCookies(req) {
   return list;
 }
 
-// In-memory brute force rate limiter for sensitive auth endpoints
-const loginAttempts = new Map(); // ip -> { count: number, resetAt: number }
+// In-memory fallback map for rate limiting when DB connection is offline
+const memoryLoginAttempts = new Map();
 
-function rateLimitLogin(req, res, next) {
-  const ip = req.ip || req.connection.remoteAddress || "unknown_ip";
+// Rate limiting helper using MongoDB collection with TTL (keyed by IP + username)
+function getRateLimitKey(req) {
+  const ip = req.ip || req.connection?.remoteAddress || req.socket?.remoteAddress || "unknown_ip";
+  const user = String(req.body?.username || req.body?.u || "").trim().toLowerCase();
+  return `${ip}:${user || "anon"}`;
+}
+
+async function rateLimitLogin(req, res, next) {
+  const key = getRateLimitKey(req);
   const now = Date.now();
-  const record = loginAttempts.get(ip);
-  if (record && record.resetAt > now) {
-    if (record.count >= 5) {
-      const waitSeconds = Math.ceil((record.resetAt - now) / 1000);
+
+  if (process.env.MONGODB_URI) {
+    try {
+      await getDbConnection();
+      const doc = await LoginAttempt.findOne({ key }).lean();
+      if (doc && new Date(doc.resetAt).getTime() > now) {
+        if (doc.count >= 5) {
+          const waitSeconds = Math.max(1, Math.ceil((new Date(doc.resetAt).getTime() - now) / 1000));
+          return res.status(429).json({
+            success: false,
+            error: "TOO_MANY_REQUESTS",
+            message: `Too many login attempts. Please try again in ${waitSeconds} seconds.`
+          });
+        }
+      }
+      return next();
+    } catch (_err) {
+      // Fall through to in-memory check
+    }
+  }
+
+  const memDoc = memoryLoginAttempts.get(key);
+  if (memDoc && memDoc.resetAt > now) {
+    if (memDoc.count >= 5) {
+      const waitSeconds = Math.max(1, Math.ceil((memDoc.resetAt - now) / 1000));
       return res.status(429).json({
         success: false,
         error: "TOO_MANY_REQUESTS",
         message: `Too many login attempts. Please try again in ${waitSeconds} seconds.`
       });
     }
-  } else {
-    loginAttempts.set(ip, { count: 0, resetAt: now + 15 * 60 * 1000 }); // 15 min window
   }
+
   next();
 }
 
-function recordFailedLogin(req) {
-  const ip = req.ip || req.connection.remoteAddress || "unknown_ip";
-  const record = loginAttempts.get(ip);
-  if (record) {
-    record.count += 1;
+async function recordFailedLogin(req) {
+  const key = getRateLimitKey(req);
+  const now = Date.now();
+  const resetAt = new Date(now + 15 * 60 * 1000);
+
+  if (process.env.MONGODB_URI) {
+    try {
+      await getDbConnection();
+      await LoginAttempt.findOneAndUpdate(
+        { key },
+        {
+          $inc: { count: 1 },
+          $setOnInsert: { resetAt }
+        },
+        { upsert: true }
+      );
+    } catch (_err) {}
+  }
+
+  const memDoc = memoryLoginAttempts.get(key);
+  if (memDoc && memDoc.resetAt > now) {
+    memDoc.count += 1;
+  } else {
+    memoryLoginAttempts.set(key, { count: 1, resetAt: now + 15 * 60 * 1000 });
   }
 }
 
-function clearLoginAttempts(req) {
-  const ip = req.ip || req.connection.remoteAddress || "unknown_ip";
-  loginAttempts.delete(ip);
+async function clearLoginAttempts(req) {
+  const key = getRateLimitKey(req);
+  if (process.env.MONGODB_URI) {
+    try {
+      await getDbConnection();
+      await LoginAttempt.deleteOne({ key });
+    } catch (_err) {}
+  }
+  memoryLoginAttempts.delete(key);
 }
 
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
@@ -75,67 +128,125 @@ app.use(cors({
   credentials: true,
   origin: true
 }));
-// Support JSON payloads including base64 QR images
-app.use(express.json({ limit: "10mb" }));
+// Support JSON payloads with route-level body limits:
+// - POST /api/teams/register: 1.5 MB limit (accommodates 700 KB screenshot = ~0.95 MB base64 plus registration fields)
+// - PUT /api/admin/problem-file/:id: 3.5 MB limit (accommodates up to 2 MB binary files = ~2.7 MB base64)
+// - POST /api/payment-settings & all other routes: 1 MB default
+const defaultJsonParser = express.json({ limit: "1mb" });
+const registerJsonParser = express.json({ limit: "1.5mb" });
+const problemFileJsonParser = express.json({ limit: "3.5mb" });
+
+app.use((req, res, next) => {
+  if (req.method === "POST" && req.path === "/api/teams/register") {
+    return registerJsonParser(req, res, next);
+  }
+  if (req.method === "PUT" && req.path.startsWith("/api/admin/problem-file/")) {
+    return problemFileJsonParser(req, res, next);
+  }
+  return defaultJsonParser(req, res, next);
+});
+
+// Convert body-parser 413 Payload Too Large error into 400 PAYLOAD_TOO_LARGE JSON response
+app.use((err, req, res, next) => {
+  if (err && (err.type === "entity.too.large" || err.status === 413)) {
+    let limitMsg = "Request payload exceeds the maximum allowed size of 1 MB.";
+    if (req.path === "/api/teams/register") {
+      limitMsg = "Registration payload exceeds the maximum allowed size of 1.5 MB. Please ensure screenshot is under 700 KB.";
+    } else if (req.path.startsWith("/api/admin/problem-file/")) {
+      limitMsg = "Problem statement file payload exceeds the maximum allowed size of 3 MB.";
+    } else if (req.path === "/api/payment-settings") {
+      limitMsg = "Payment settings payload exceeds the maximum allowed limit of 1 MB. Please ensure the QR image is compressed.";
+    }
+    return res.status(400).json({
+      success: false,
+      error: "PAYLOAD_TOO_LARGE",
+      message: limitMsg
+    });
+  }
+  return next(err);
+});
 
 // Serve static assets (css, js, assets, index.html) for local development
-app.use(express.static(path.join(__dirname)));
+app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "index.html"));
+  res.sendFile(path.join(__dirname, "public", "index.html"));
 });
+
+const DB_RETRY_COOLDOWN_MS = 5000;
+let cachedDbPromise = null;
+let nextDbRetryAt = 0;
+let paymentFallbackWarned = false;
+
+function isDatabaseUnavailable(err) {
+  return err?.code === "MONGODB_URI_NOT_CONFIGURED"
+    || err?.code === "DATABASE_UNAVAILABLE"
+    || ["DatabaseUnavailableError", "MongooseServerSelectionError", "MongoServerSelectionError", "MongoNetworkError", "MongoNetworkTimeoutError", "MongoTopologyClosedError"].includes(err?.name);
+}
+
+function databaseUnavailableResponse(res, message = "The database is temporarily unavailable. Please try again later.") {
+  return res.status(503).json({
+    success: false,
+    error: "DATABASE_UNAVAILABLE",
+    message
+  });
+}
 
 // Safe connection event listeners for diagnostics
 mongoose.connection.on("connecting", () => {
   console.log("[MongoDB] State: Connecting to cluster...");
 });
 mongoose.connection.on("connected", () => {
+  nextDbRetryAt = 0;
+  paymentFallbackWarned = false;
   console.log("[MongoDB] State: Connected successfully.");
 });
 mongoose.connection.on("open", () => {
   console.log("[MongoDB] State: Connection open and ready.");
 });
 mongoose.connection.on("disconnected", () => {
+  cachedDbPromise = null;
+  nextDbRetryAt = Date.now() + DB_RETRY_COOLDOWN_MS;
   console.log("[MongoDB] State: Disconnected.");
 });
 mongoose.connection.on("error", (err) => {
-  console.warn(`[MongoDB Error] ${err.name}: ${err.message}`);
+  console.warn(`[MongoDB Error] ${err.name}${err.code ? ` (${err.code})` : ""}`);
 });
-
-let cachedDbPromise = null;
 
 async function getDbConnection() {
   if (mongoose.connection.readyState === 1) {
     return mongoose.connection;
   }
   if (!process.env.MONGODB_URI) {
-    throw new Error("MONGODB_URI_NOT_CONFIGURED");
+    const err = new Error("MONGODB_URI_NOT_CONFIGURED");
+    err.code = "MONGODB_URI_NOT_CONFIGURED";
+    throw err;
   }
-  if (!cachedDbPromise) {
-    cachedDbPromise = mongoose.connect(process.env.MONGODB_URI, {
+  if (cachedDbPromise) {
+    return cachedDbPromise;
+  }
+  if (Date.now() < nextDbRetryAt) {
+    const err = new Error("Database retry is temporarily delayed after a connection failure.");
+    err.name = "DatabaseUnavailableError";
+    err.code = "DATABASE_UNAVAILABLE";
+    throw err;
+  }
+
+  const connectionAttempt = mongoose.connect(process.env.MONGODB_URI, {
       serverSelectionTimeoutMS: 5000,
       connectTimeoutMS: 5000
     }).then(m => {
       console.log("[MongoDB] mongoose.connect() resolved successfully.");
       return m.connection;
     }).catch(err => {
-      cachedDbPromise = null;
-      let detailedMsg = err.message;
-      if (err.reason && err.reason.servers) {
-        const serverErrors = [];
-        for (const [srv, desc] of err.reason.servers.entries()) {
-          if (desc.error) {
-            serverErrors.push(`${srv} -> ${desc.error.message}`);
-          }
-        }
-        if (serverErrors.length > 0) {
-          detailedMsg += ` [Server handshake errors: ${serverErrors.join("; ")}]`;
-        }
+      if (cachedDbPromise === connectionAttempt) {
+        cachedDbPromise = null;
+        nextDbRetryAt = Date.now() + DB_RETRY_COOLDOWN_MS;
       }
-      console.warn(`[MongoDB Connection Failed] ${err.name}: ${detailedMsg}`);
+      console.warn(`[MongoDB Connection Failed] ${err.name}${err.code ? ` (${err.code})` : ""}`);
       throw err;
     });
-  }
+  cachedDbPromise = connectionAttempt;
   return cachedDbPromise;
 }
 
@@ -150,6 +261,57 @@ const paymentSettingsSchema = new mongoose.Schema({
 });
 
 const PaymentSettings = mongoose.models.PaymentSettings || mongoose.model("PaymentSettings", paymentSettingsSchema);
+
+// Event Data Schema (Single Document "global_event" for event info, timeline, rules, prizes, judges, FAQ, tracks, files, announcements)
+const eventDataSchema = new mongoose.Schema({
+  key: { type: String, required: true, unique: true, default: "global_event" },
+  event: {
+    title: { type: String, default: "" },
+    about: { type: String, default: "" },
+    date: { type: String, default: "" },
+    time: { type: String, default: "" },
+    venue: { type: String, default: "" },
+    fee: { type: String, default: "500" },
+    upiId: { type: String, default: "" },
+    payeeName: { type: String, default: "" },
+    contact: { type: String, default: "" },
+    qrImage: { type: String, default: "" }
+  },
+  timeline: { type: [{ t: String, d: String }], default: [] },
+  rules: { type: [{ t: String, d: String }], default: [] },
+  prizes: { type: [{ t: String, d: String }], default: [] },
+  judges: { type: [{ t: String, d: String }], default: [] },
+  faq: { type: [{ t: String, d: String }], default: [] },
+  tracks: { type: [{ name: String, problems: [String] }], default: [] },
+  problemStatementFiles: {
+    type: [{
+      id: String,
+      track: String,
+      title: String,
+      description: String,
+      fileName: String,
+      fileType: String,
+      uploadDate: String,
+      active: { type: Boolean, default: true }
+    }],
+    default: []
+  },
+  announcements: { type: [{ t: String, d: String }], default: [] },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+const EventData = mongoose.models.EventData || mongoose.model("EventData", eventDataSchema);
+
+// ProblemFile Schema (Separate collection for storing large base64 file payloads, max 2MB)
+const problemFileSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true, index: true },
+  fileData: { type: String, required: true },
+  fileName: { type: String, default: "" },
+  fileType: { type: String, default: "" },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+const ProblemFile = mongoose.models.ProblemFile || mongoose.model("ProblemFile", problemFileSchema);
 
 // Team Member Sub-schema
 const teamMemberSchema = new mongoose.Schema({
@@ -166,7 +328,7 @@ const teamSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true, index: true }, // Format: 24H001
   name: { type: String, required: true, trim: true },
   leader: { type: String, required: true, trim: true },
-  mobile: { type: String, required: true, trim: true, index: true },
+  mobile: { type: String, required: true, trim: true },
   email: { type: String, required: true, lowercase: true, trim: true },
   college: { type: String, default: "", trim: true },
   department: { type: String, default: "", trim: true },
@@ -197,10 +359,29 @@ const teamSchema = new mongoose.Schema({
 });
 
 // Composite/unique constraints
-teamSchema.index({ email: 1 });
+teamSchema.index({ email: 1 }, { unique: true });
+teamSchema.index({ mobile: 1 }, { unique: true });
 teamSchema.index({ "members.email": 1 });
 
 const Team = mongoose.models.Team || mongoose.model("Team", teamSchema);
+
+// MongoDB LoginAttempt Schema for distributed, serverless rate limiting
+const loginAttemptSchema = new mongoose.Schema({
+  key: { type: String, required: true, unique: true, index: true }, // Format: ip:username
+  count: { type: Number, default: 1 },
+  resetAt: { type: Date, required: true }
+});
+loginAttemptSchema.index({ resetAt: 1 }, { expireAfterSeconds: 0 });
+
+const LoginAttempt = mongoose.models.LoginAttempt || mongoose.model("LoginAttempt", loginAttemptSchema);
+
+// Counter Schema for atomic, sequence-based Team ID generation
+const counterSchema = new mongoose.Schema({
+  _id: { type: String, required: true },
+  seq: { type: Number, default: 0 }
+});
+
+const Counter = mongoose.models.Counter || mongoose.model("Counter", counterSchema);
 
 // MongoDB Session Schema for Serverless-compatible authentication
 const sessionSchema = new mongoose.Schema({
@@ -228,15 +409,94 @@ let memoryPaymentSettings = {
   updatedAt: new Date().toISOString()
 };
 
+let memoryEventData = {
+  key: "global_event",
+  event: {
+    title: "26 HRS HACKATHON – NEXUS",
+    about: "26 HRS HACKATHON – NEXUS is an intensive technical hackathon organized by Excel Engineering College (Autonomous), Department of Information Technology in association with Binary Brains – Domain Club, in collaboration with United Soft Tech, Salem. Open for students across all years to build innovative technological solutions.",
+    date: "2026-10-30",
+    time: "10:00 AM (Start: Oct 30, 10:00 AM · End: Oct 31, 1:00 PM)",
+    venue: "IT Lab, B Block, Excel Engineering College (Autonomous), Komarapalayam",
+    fee: "500",
+    upiId: "suba.arni@okaxis",
+    payeeName: "Banu Priya",
+    contact: "Coordinators: Mrs. Banupriya (AP/IT) · Mrs. Divya K. (AP/IT) | Excel Engineering College (Autonomous), Komarapalayam – 637303, Namakkal District",
+    qrImage: ""
+  },
+  timeline: [
+    { t: "Day 1 – 10:00 AM (Oct 30)", d: "Inauguration & Hackathon Commencement at IT Lab, B Block" },
+    { t: "Day 1 – 01:00 PM", d: "Lunch Break" },
+    { t: "Day 1 – 04:30 PM", d: "Refreshment / Tea & Snacks" },
+    { t: "Day 1 – 07:00 PM", d: "Mentoring & First Review by Industry Experts" },
+    { t: "Day 2 – 08:30 AM (Oct 31)", d: "Breakfast & Final Sprint" },
+    { t: "Day 2 – 11:30 AM", d: "Final Project Presentation & Evaluation" },
+    { t: "Day 2 – 01:00 PM (Oct 31)", d: "Valedictory Ceremony & Prize Distribution" }
+  ],
+  rules: [
+    { t: "Eligibility & Team Size", d: "Open to students of all years. Each team must consist of 2 to 4 members, including 1 Team Leader. Registration is ₹500 per participant." },
+    { t: "Hackathon Duration", d: "Continuous 26-hour hackathon starting October 30, 2026 at 10:00 AM and concluding October 31, 2026 at 1:00 PM." },
+    { t: "Venue & Conduct", d: "The event will be held physically at IT Lab, B Block. Participants must maintain academic integrity and professional conduct." },
+    { t: "Evaluation Criteria", d: "Projects are evaluated by industry experts on innovation, technical implementation, feasibility, presentation, and team collaboration." }
+  ],
+  prizes: [
+    { t: "Total Cash Prize Pool", d: "₹10,000 for top performing teams" },
+    { t: "Excellence Awards", d: "Certificates of Merit & Trophy for Winners" },
+    { t: "Participation Certificate", d: "Official Certificate of Participation for all registered team members" }
+  ],
+  judges: [
+    { t: "Mr. S. Alagappandi", d: "Team Lead – United Soft Tech, Salem" },
+    { t: "Mr. G. Mohanraj", d: "Circuit Division – United Soft Tech, Salem" },
+    { t: "Mr. A. Karthick", d: "Graphic Designer – United Soft Tech, Salem" }
+  ],
+  faq: [
+    { t: "Who can participate in 26 HRS HACKATHON – NEXUS?", d: "Students from all years across engineering and technology disciplines are eligible to participate." },
+    { t: "What is the required team size?", d: "Each team must have 2 to 4 members, including the Team Leader. Registration costs ₹500 per participant." },
+    { t: "Where will the hackathon take place?", d: "The event will be conducted at IT Lab, B Block, Excel Engineering College (Autonomous), Komarapalayam." },
+    { t: "When does the event start and end?", d: "It begins on October 30, 2026 at 10:00 AM IST and concludes on October 31, 2026 at 1:00 PM IST (26 hours duration)." },
+    { t: "Who are the event coordinators?", d: "Faculty Coordinators: Mrs. Banupriya (AP/IT) and Mrs. Divya K. (AP/IT), Department of Information Technology." }
+  ],
+  tracks: [],
+  problemStatementFiles: [],
+  announcements: [],
+  updatedAt: new Date().toISOString()
+};
+
 // Server-side Admin Authentication & Session Management
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const IS_PROD = process.env.NODE_ENV === "production";
 
-// Fail safely in production if ADMIN_PASSWORD is unset or trivial default
-if (IS_PROD && (!ADMIN_PASSWORD || ADMIN_PASSWORD === "admin123" || ADMIN_PASSWORD.length < 8)) {
-  console.error("CRITICAL SECURITY ERROR: ADMIN_PASSWORD environment variable must be set to a strong password in production. Terminating process.");
-  process.exit(1);
+// Middleware to ensure critical environment variables are configured
+function checkRequiredConfig(req, res, next) {
+  // Allow health endpoint to report status independently
+  if (req.path === "/api/health") {
+    return next();
+  }
+
+  const isProd = process.env.NODE_ENV === "production";
+  const adminPass = process.env.ADMIN_PASSWORD;
+
+  // In production or admin login/verify requests, ensure ADMIN_PASSWORD is set and strong
+  if ((isProd || req.path.startsWith("/api/admin")) && (!adminPass || adminPass.trim().length < 8)) {
+    return res.status(500).json({
+      success: false,
+      error: "CONFIGURATION_ERROR",
+      message: "Server configuration error: ADMIN_PASSWORD environment variable must be set to at least 8 characters. Please configure it in your Vercel Project Settings."
+    });
+  }
+
+  // If in production and MONGODB_URI is completely missing
+  if (isProd && !process.env.MONGODB_URI) {
+    return res.status(503).json({
+      success: false,
+      error: "CONFIGURATION_ERROR",
+      message: "Server configuration error: MONGODB_URI environment variable is missing. Please configure it in your Vercel Project Settings."
+    });
+  }
+
+  next();
 }
+
+app.use(checkRequiredConfig);
 
 const EFFECTIVE_ADMIN_PASSWORD = ADMIN_PASSWORD || "admin123";
 
@@ -295,7 +555,10 @@ async function authenticateAdmin(req, res, next) {
       message: "Invalid or expired admin session. Please log in with valid credentials."
     });
   } catch (err) {
-    console.error("Admin authentication middleware error:", err);
+    if (isDatabaseUnavailable(err)) {
+      return databaseUnavailableResponse(res, "Admin authentication is temporarily unavailable because the database cannot be reached.");
+    }
+    console.error("Admin authentication middleware error:", err.name);
     return res.status(500).json({
       success: false,
       error: "SERVER_ERROR",
@@ -359,7 +622,10 @@ app.post("/api/admin/login", rateLimitLogin, async (req, res) => {
       expiresIn: Math.floor(SESSION_TTL_MS / 1000)
     });
   } catch (err) {
-    console.error("Admin login error:", err);
+    if (isDatabaseUnavailable(err)) {
+      return databaseUnavailableResponse(res, "Admin login is temporarily unavailable because the database cannot be reached.");
+    }
+    console.error("Admin login error:", err.name);
     return res.status(500).json({
       success: false,
       error: "SERVER_ERROR",
@@ -422,11 +688,11 @@ app.get("/api/admin/me", async (req, res) => {
       authenticated: false
     });
   } catch (err) {
-    console.error("Error in /api/admin/me:", err);
-    return res.status(200).json({
-      success: true,
-      authenticated: false
-    });
+    if (isDatabaseUnavailable(err)) {
+      return databaseUnavailableResponse(res, "Admin session verification is temporarily unavailable because the database cannot be reached.");
+    }
+    console.error("Error in /api/admin/me:", err.name);
+    return res.status(500).json({ success: false, error: "SERVER_ERROR", message: "Failed to verify the admin session." });
   }
 });
 
@@ -486,7 +752,10 @@ async function authenticateTeam(req, res, next) {
       message: "Please log in to access your team dashboard."
     });
   } catch (err) {
-    console.error("Team authentication middleware error:", err);
+    if (isDatabaseUnavailable(err)) {
+      return databaseUnavailableResponse(res, "Team authentication is temporarily unavailable because the database cannot be reached.");
+    }
+    console.error("Team authentication middleware error:", err.name);
     return res.status(500).json({
       success: false,
       error: "SERVER_ERROR",
@@ -495,9 +764,40 @@ async function authenticateTeam(req, res, next) {
   }
 }
 
-// Helper to generate next unique team ID
+// Helper to generate next unique team ID backed by an atomic Counter collection
 async function generateNextTeamId() {
-  const latestTeam = await Team.findOne({ id: /^24H\d{3}$/ }).sort({ id: -1 }).lean();
+  // If database is available, atomically increment the counter
+  if (mongoose.connection.readyState === 1 || process.env.MONGODB_URI) {
+    try {
+      await getDbConnection();
+      // Ensure counter starts at current max team ID if counter not initialized
+      const existingCounter = await Counter.findById("team_id");
+      if (!existingCounter) {
+        const latestTeam = await Team.findOne({ id: /^24H\d{3,}$/ }).sort({ id: -1 }).lean();
+        let maxNum = 0;
+        if (latestTeam && latestTeam.id) {
+          const match = latestTeam.id.match(/^24H(\d+)$/);
+          if (match) maxNum = parseInt(match[1], 10);
+        }
+        await Counter.findByIdAndUpdate(
+          "team_id",
+          { $max: { seq: maxNum } },
+          { upsert: true, returnDocument: "after" }
+        );
+      }
+
+      const counter = await Counter.findByIdAndUpdate(
+        "team_id",
+        { $inc: { seq: 1 } },
+        { upsert: true, returnDocument: "after" }
+      );
+      return "24H" + String(counter.seq).padStart(3, "0");
+    } catch (_err) {
+      // Fallback to highest team ID scan if counter update encounters issue
+    }
+  }
+
+  const latestTeam = await Team.findOne({ id: /^24H\d{3,}$/ }).sort({ id: -1 }).lean();
   let nextNum = 1;
   if (latestTeam && latestTeam.id) {
     const match = latestTeam.id.match(/^24H(\d+)$/);
@@ -515,58 +815,104 @@ app.post("/api/teams/register", rateLimitLogin, async (req, res) => {
     const [leader, ...normMembers] = registration.participants;
     await getDbConnection();
 
-    const participantEmails = registration.participants.map(participant => participant.email);
-    const existingLeader = await Team.findOne({
-      $or: [
-        { email: { $in: participantEmails } },
-        { "members.email": { $in: participantEmails } },
-        { mobile: leader.mobile }
-      ]
+    // 1. Check duplicate team name (case-insensitive)
+    const escapedTeamName = registration.team.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const existingName = await Team.findOne({
+      name: new RegExp(`^${escapedTeamName}$`, "i")
     }).lean();
-
-    if (existingLeader) {
+    if (existingName) {
       return res.status(400).json({
         success: false,
-        error: "DUPLICATE_REGISTRATION",
-        message: "A participant email or the team leader mobile is already registered."
+        error: "DUPLICATE_TEAM_NAME",
+        message: "This team name is already taken. Please choose a different team name."
+      });
+    }
+
+    // 2. Check duplicate leader mobile
+    const existingMobile = await Team.findOne({ mobile: leader.mobile }).lean();
+    if (existingMobile) {
+      return res.status(400).json({
+        success: false,
+        error: "DUPLICATE_MOBILE",
+        message: "The team leader mobile number is already registered with another team."
+      });
+    }
+
+    // 3. Check duplicate emails across leader and all members
+    const participantEmails = registration.participants.map(participant => participant.email.toLowerCase());
+    const existingEmail = await Team.findOne({
+      $or: [
+        { email: { $in: participantEmails } },
+        { "members.email": { $in: participantEmails } }
+      ]
+    }).lean();
+    if (existingEmail) {
+      return res.status(400).json({
+        success: false,
+        error: "DUPLICATE_EMAIL",
+        message: "One or more participant email addresses are already registered."
       });
     }
 
     // Hash password with bcrypt (default password is leader mobile number)
     const saltRounds = 10;
     const passwordHash = await bcrypt.hash(leader.mobile, saltRounds);
-    const newTeamId = await generateNextTeamId();
 
-    const createdTeam = await Team.create({
-      id: newTeamId,
-      name: registration.team,
-      leader: leader.name,
-      mobile: leader.mobile,
-      email: leader.email,
-      college: leader.college,
-      department: leader.department,
-      year: leader.year,
-      teamSize: registration.teamSize,
-      feePerPerson: registration.feePerPerson,
-      totalAmount: registration.totalAmount,
-      members: normMembers,
-      track: "",
-      problem: "",
-      title: "",
-      desc: "",
-      pay: {
-        method: registration.method,
-        utr: registration.utr,
-        shot: registration.shot,
-        status: "Pending"
-      },
-      status: "Pending",
-      acc: {
-        userId: leader.name,
-        passwordHash,
-        enabled: false // Admin approval required
+    let createdTeam = null;
+    let attempts = 0;
+    while (!createdTeam && attempts < 5) {
+      attempts++;
+      const newTeamId = await generateNextTeamId();
+      try {
+        createdTeam = await Team.create({
+          id: newTeamId,
+          name: registration.team,
+          leader: leader.name,
+          mobile: leader.mobile,
+          email: leader.email,
+          college: leader.college,
+          department: leader.department,
+          year: leader.year,
+          teamSize: registration.teamSize,
+          feePerPerson: registration.feePerPerson,
+          totalAmount: registration.totalAmount,
+          members: normMembers,
+          track: "",
+          problem: "",
+          title: "",
+          desc: "",
+          pay: {
+            method: registration.method,
+            utr: registration.utr,
+            shot: registration.shot,
+            status: "Pending"
+          },
+          status: "Pending",
+          acc: {
+            userId: leader.name,
+            passwordHash,
+            enabled: false // Admin approval required
+          }
+        });
+      } catch (createErr) {
+        if (createErr.code === 11000 && createErr.keyPattern?.id && attempts < 5) {
+          // Collision on team ID, retry with next incremented counter
+          continue;
+        }
+        if (createErr.code === 11000) {
+          if (createErr.keyPattern?.name) {
+            return res.status(400).json({ success: false, error: "DUPLICATE_TEAM_NAME", message: "This team name is already taken. Please choose a different team name." });
+          }
+          if (createErr.keyPattern?.mobile) {
+            return res.status(400).json({ success: false, error: "DUPLICATE_MOBILE", message: "The team leader mobile number is already registered with another team." });
+          }
+          if (createErr.keyPattern?.email || createErr.keyPattern?.["members.email"]) {
+            return res.status(400).json({ success: false, error: "DUPLICATE_EMAIL", message: "One or more participant email addresses are already registered." });
+          }
+        }
+        throw createErr;
       }
-    });
+    }
 
     return res.status(201).json({
       success: true,
@@ -588,12 +934,8 @@ app.post("/api/teams/register", rateLimitLogin, async (req, res) => {
     if (err instanceof RegistrationValidationError) {
       return res.status(400).json({ success: false, error: err.code, message: err.message });
     }
-    if (err.message === "MONGODB_URI_NOT_CONFIGURED" || /mongoose|mongo|database/i.test(err.name || "")) {
-      return res.status(503).json({
-        success: false,
-        error: "DATABASE_UNAVAILABLE",
-        message: "Registration could not be saved because the database is unavailable. Please try again later."
-      });
+    if (isDatabaseUnavailable(err)) {
+      return databaseUnavailableResponse(res, "Registration could not be saved because the database is unavailable. Please try again later.");
     }
     console.error("Team registration error:", err);
     return res.status(500).json({
@@ -621,12 +963,13 @@ app.post("/api/teams/login", rateLimitLogin, async (req, res) => {
       });
     }
 
-    // Find team by leader user ID or mobile (case insensitive user ID)
-    const team = await Team.findOne({
-      "acc.userId": new RegExp(`^${cleanUser.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i")
+    // Find ALL teams whose acc.userId matches the leader name (case-insensitive)
+    const escapedUser = cleanUser.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const matchingTeams = await Team.find({
+      "acc.userId": new RegExp(`^${escapedUser}$`, "i")
     });
 
-    if (!team) {
+    if (!matchingTeams || matchingTeams.length === 0) {
       recordFailedLogin(req);
       return res.status(401).json({
         success: false,
@@ -635,9 +978,19 @@ app.post("/api/teams/login", rateLimitLogin, async (req, res) => {
       });
     }
 
-    // Compare bcrypt password hash
-    const isMatch = await bcrypt.compare(cleanPass, team.acc.passwordHash);
-    if (!isMatch) {
+    // Accept the login if the bcrypt password matches any one of them
+    let authenticatedTeam = null;
+    for (const candidate of matchingTeams) {
+      if (candidate.acc?.passwordHash) {
+        const isMatch = await bcrypt.compare(cleanPass, candidate.acc.passwordHash);
+        if (isMatch) {
+          authenticatedTeam = candidate;
+          break;
+        }
+      }
+    }
+
+    if (!authenticatedTeam) {
       recordFailedLogin(req);
       return res.status(401).json({
         success: false,
@@ -646,7 +999,8 @@ app.post("/api/teams/login", rateLimitLogin, async (req, res) => {
       });
     }
 
-    if (!team.acc.enabled) {
+    // Check acc.enabled after password match
+    if (!authenticatedTeam.acc.enabled) {
       return res.status(403).json({
         success: false,
         error: "ACCOUNT_DISABLED",
@@ -663,8 +1017,8 @@ app.post("/api/teams/login", rateLimitLogin, async (req, res) => {
     await Session.create({
       tokenHash,
       role: "team",
-      teamId: team.id,
-      userId: team.acc.userId,
+      teamId: authenticatedTeam.id,
+      userId: authenticatedTeam.acc.userId,
       createdAt: new Date(),
       expiresAt
     });
@@ -677,11 +1031,14 @@ app.post("/api/teams/login", rateLimitLogin, async (req, res) => {
       success: true,
       message: "Team login successful.",
       role: "team",
-      teamId: team.id,
+      teamId: authenticatedTeam.id,
       token
     });
   } catch (err) {
     console.error("Team login error:", err);
+    if (isDatabaseUnavailable(err)) {
+      return databaseUnavailableResponse(res, "Team login is temporarily unavailable because the database cannot be reached.");
+    }
     return res.status(500).json({
       success: false,
       error: "SERVER_ERROR",
@@ -792,7 +1149,7 @@ app.post("/api/teams/logout", async (req, res) => {
 
 // ADMIN TEAM MANAGEMENT ENDPOINTS (Strictly protected by authenticateAdmin)
 
-// GET /api/admin/teams - List all teams for Admin Dashboard
+// GET /api/admin/teams - List all teams for Admin Dashboard (excludes large screenshot data)
 app.get("/api/admin/teams", authenticateAdmin, async (req, res) => {
   try {
     await getDbConnection();
@@ -820,7 +1177,7 @@ app.get("/api/admin/teams", authenticateAdmin, async (req, res) => {
         method: t.pay?.method || "UPI",
         utr: t.pay?.utr || "",
         status: t.pay?.status || "Pending",
-        shot: t.pay?.shot || ""
+        hasShot: Boolean(t.pay?.shot)
       },
       status: t.status,
       acc: {
@@ -831,8 +1188,31 @@ app.get("/api/admin/teams", authenticateAdmin, async (req, res) => {
 
     return res.status(200).json({ success: true, data: sanitizedTeams });
   } catch (err) {
+    if (isDatabaseUnavailable(err)) {
+      return databaseUnavailableResponse(res, "Teams list is temporarily unavailable because the database cannot be reached.");
+    }
     console.error("Admin list teams error:", err);
     return res.status(500).json({ success: false, error: "SERVER_ERROR", message: "Failed to load teams." });
+  }
+});
+
+// GET /api/admin/teams/:id/screenshot - Authenticated admin retrieves payment screenshot
+app.get("/api/admin/teams/:id/screenshot", authenticateAdmin, async (req, res) => {
+  try {
+    await getDbConnection();
+    const targetId = req.params.id;
+    const team = await Team.findOne({ id: targetId }, { "pay.shot": 1 }).lean();
+    if (!team) {
+      return res.status(404).json({ success: false, error: "TEAM_NOT_FOUND", message: "Team not found." });
+    }
+    const shot = team.pay?.shot || "";
+    if (!shot) {
+      return res.status(404).json({ success: false, error: "NO_SCREENSHOT", message: "No payment screenshot found for this team." });
+    }
+    return res.status(200).json({ success: true, shot });
+  } catch (err) {
+    console.error("Admin get team screenshot error:", err);
+    return res.status(500).json({ success: false, error: "SERVER_ERROR", message: "Failed to load payment screenshot." });
   }
 });
 
@@ -843,11 +1223,56 @@ app.put("/api/admin/teams/:id", authenticateAdmin, async (req, res) => {
     const targetId = req.params.id;
     const { name, leader, mobile, email, college, department, year, track, problem, title, desc, ps, st, utr, members, enabled, password } = req.body || {};
 
+    const existingTeam = await Team.findOne({ id: targetId });
+    if (!existingTeam) {
+      return res.status(404).json({ success: false, error: "TEAM_NOT_FOUND", message: "Team not found." });
+    }
+
+    const cleanMobile = mobile !== undefined ? String(mobile).trim() : undefined;
+    const cleanEmail = email !== undefined ? String(email).trim().toLowerCase() : undefined;
+
+    // Check duplicate mobile if mobile is changing
+    if (cleanMobile && cleanMobile !== existingTeam.mobile) {
+      const duplicateMobile = await Team.findOne({
+        id: { $ne: targetId },
+        mobile: cleanMobile
+      }).lean();
+      if (duplicateMobile) {
+        return res.status(400).json({
+          success: false,
+          error: "DUPLICATE_MOBILE",
+          message: "This mobile number is already registered with another team."
+        });
+      }
+    }
+
+    // Check duplicate email if email is changing
+    if (cleanEmail && cleanEmail !== existingTeam.email) {
+      const duplicateEmail = await Team.findOne({
+        id: { $ne: targetId },
+        $or: [
+          { email: cleanEmail },
+          { "members.email": cleanEmail }
+        ]
+      }).lean();
+      if (duplicateEmail) {
+        return res.status(400).json({
+          success: false,
+          error: "DUPLICATE_EMAIL",
+          message: "This email address is already registered with another team."
+        });
+      }
+    }
+
     const updateFields = { updatedAt: new Date() };
     if (name !== undefined) updateFields.name = String(name).trim();
-    if (leader !== undefined) updateFields.leader = String(leader).trim();
-    if (mobile !== undefined) updateFields.mobile = String(mobile).trim();
-    if (email !== undefined) updateFields.email = String(email).trim().toLowerCase();
+    if (leader !== undefined) {
+      const cleanLeader = String(leader).trim();
+      updateFields.leader = cleanLeader;
+      updateFields["acc.userId"] = cleanLeader;
+    }
+    if (cleanMobile !== undefined) updateFields.mobile = cleanMobile;
+    if (cleanEmail !== undefined) updateFields.email = cleanEmail;
     if (college !== undefined) updateFields.college = String(college).trim();
     if (department !== undefined) updateFields.department = String(department).trim();
     if (year !== undefined) updateFields.year = String(year).trim();
@@ -865,9 +1290,27 @@ app.put("/api/admin/teams/:id", authenticateAdmin, async (req, res) => {
       updateFields["acc.passwordHash"] = await bcrypt.hash(String(password).trim(), 10);
     }
 
-    const updated = await Team.findOneAndUpdate({ id: targetId }, { $set: updateFields }, { returnDocument: "after" }).lean();
-    if (!updated) {
-      return res.status(404).json({ success: false, error: "TEAM_NOT_FOUND", message: "Team not found." });
+    let updated;
+    try {
+      updated = await Team.findOneAndUpdate({ id: targetId }, { $set: updateFields }, { returnDocument: "after" }).lean();
+    } catch (saveErr) {
+      if (saveErr.code === 11000) {
+        if (saveErr.keyPattern?.mobile) {
+          return res.status(400).json({
+            success: false,
+            error: "DUPLICATE_MOBILE",
+            message: "This mobile number is already registered with another team."
+          });
+        }
+        if (saveErr.keyPattern?.email || saveErr.keyPattern?.["members.email"]) {
+          return res.status(400).json({
+            success: false,
+            error: "DUPLICATE_EMAIL",
+            message: "This email address is already registered with another team."
+          });
+        }
+      }
+      throw saveErr;
     }
 
     return res.status(200).json({ success: true, message: "Team updated successfully.", data: updated });
@@ -892,75 +1335,6 @@ app.delete("/api/admin/teams/:id", authenticateAdmin, async (req, res) => {
   }
 });
 
-// POST /api/admin/teams/migrate - Safe legacy import endpoint to migrate teams from localStorage to MongoDB
-app.post("/api/admin/teams/migrate", authenticateAdmin, async (req, res) => {
-  try {
-    await getDbConnection();
-    const { teams } = req.body || {};
-    if (!Array.isArray(teams) || teams.length === 0) {
-      return res.status(400).json({ success: false, error: "NO_TEAMS", message: "No teams provided for migration." });
-    }
-
-    let importedCount = 0;
-    let skippedCount = 0;
-
-    for (const t of teams) {
-      if (!t.id || !t.leader) {
-        skippedCount++;
-        continue;
-      }
-      const existing = await Team.findOne({ id: t.id }).lean();
-      if (existing) {
-        skippedCount++;
-        continue;
-      }
-
-      // Hash password (mobile or t.acc.password)
-      const rawPw = t.acc?.password || t.mobile || "1234567890";
-      const passwordHash = await bcrypt.hash(String(rawPw), 10);
-
-      await Team.create({
-        id: t.id,
-        name: t.name || "Team " + t.id,
-        leader: t.leader,
-        mobile: t.mobile || "",
-        email: (t.email || "").toLowerCase(),
-        college: t.college || "",
-        year: t.year || "1",
-        members: Array.isArray(t.members) ? t.members : [],
-        track: t.track || "",
-        problem: t.problem || "",
-        problemStatementId: t.problemStatementId || "",
-        title: t.title || "",
-        desc: t.desc || "",
-        pay: {
-          method: t.pay?.method || "UPI",
-          utr: t.pay?.utr || "",
-          shot: t.pay?.shot || "",
-          status: t.pay?.status || "Pending"
-        },
-        status: t.status || "Pending",
-        acc: {
-          userId: t.acc?.userId || t.leader,
-          passwordHash,
-          enabled: Boolean(t.acc?.enabled)
-        }
-      });
-      importedCount++;
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: `Migration completed: ${importedCount} teams imported to MongoDB, ${skippedCount} skipped (already present or invalid).`,
-      importedCount,
-      skippedCount
-    });
-  } catch (err) {
-    console.error("Migration error:", err);
-    return res.status(500).json({ success: false, error: "MIGRATION_ERROR", message: err.message });
-  }
-});
-
 // GET /api/payment-settings - Public endpoint to retrieve active payment configuration
 app.get("/api/payment-settings", async (req, res) => {
   try {
@@ -982,8 +1356,11 @@ app.get("/api/payment-settings", async (req, res) => {
             updatedAt: doc.updatedAt
           }
         });
-      } catch (dbErr) {
-        console.warn("MongoDB unavailable in /api/payment-settings, using fallback store:", dbErr.message);
+      } catch {
+        if (!paymentFallbackWarned) {
+          console.warn("[Payment settings] MongoDB unavailable; serving the explicitly marked in-memory fallback.");
+          paymentFallbackWarned = true;
+        }
       }
     }
 
@@ -1011,6 +1388,15 @@ app.get("/api/payment-settings", async (req, res) => {
 // POST /api/payment-settings - Protected endpoint to update active payment configuration
 app.post("/api/payment-settings", authenticateAdmin, async (req, res) => {
   try {
+    const payloadStr = JSON.stringify(req.body || {});
+    if (payloadStr.length > 1024 * 1024) {
+      return res.status(400).json({
+        success: false,
+        error: "PAYLOAD_TOO_LARGE",
+        message: "Payment settings payload exceeds the maximum allowed limit of 1 MB. Please ensure the QR image is compressed."
+      });
+    }
+
     const { upiId, payeeName, fee, qrImage } = req.body;
 
     // Backend Validation: UPI ID
@@ -1054,7 +1440,6 @@ app.post("/api/payment-settings", authenticateAdmin, async (req, res) => {
     };
 
     let savedToDb = false;
-    let dbErrorMessage = null;
 
     if (process.env.MONGODB_URI) {
       try {
@@ -1081,30 +1466,28 @@ app.post("/api/payment-settings", authenticateAdmin, async (req, res) => {
           }
         });
       } catch (dbErr) {
-        dbErrorMessage = dbErr.name === "MongooseServerSelectionError"
-          ? "Database unreachable (check Atlas IP access list or network connection)"
-          : dbErr.message;
-        console.warn("MongoDB write failed, reporting failure:", dbErrorMessage);
+        console.warn(`[Payment settings] MongoDB write failed: ${dbErr.name}${dbErr.code ? ` (${dbErr.code})` : ""}`);
       }
     }
 
-    // If MongoDB was configured but unreachable, report connection failure
     if (process.env.MONGODB_URI && !savedToDb) {
-      return res.status(503).json({
-        success: false,
-        database: "disconnected",
-        error: "DATABASE_UNAVAILABLE",
-        message: dbErrorMessage || "MongoDB database is currently unreachable. Settings could not be persisted to the database."
-      });
+      return databaseUnavailableResponse(res, "MongoDB database is currently unreachable. Settings could not be persisted to the database.");
     }
 
-    // If no MONGODB_URI configured at all, fallback to local memory
+    // In-memory fallback if no DB configured
     Object.assign(memoryPaymentSettings, updatePayload);
+
     return res.status(200).json({
       success: true,
-      database: "none",
-      message: "Payment settings saved to backend memory (MONGODB_URI not set).",
-      data: memoryPaymentSettings
+      database: "fallback",
+      message: "Payment settings saved in-memory (persistent database storage not configured).",
+      data: {
+        upiId: memoryPaymentSettings.upiId,
+        payeeName: memoryPaymentSettings.payeeName,
+        fee: memoryPaymentSettings.fee,
+        qrImage: memoryPaymentSettings.qrImage || "",
+        updatedAt: memoryPaymentSettings.updatedAt
+      }
     });
 
   } catch (err) {
@@ -1113,6 +1496,578 @@ app.post("/api/payment-settings", authenticateAdmin, async (req, res) => {
       success: false,
       error: "SERVER_ERROR",
       message: "Internal server error updating payment settings."
+    });
+  }
+});
+
+// In-memory fallback map for ProblemFile when MongoDB is not connected
+const memoryProblemFiles = new Map();
+
+// GET /api/teams/problem-file/:id - Authenticated team retrieves problem statement file
+app.get("/api/teams/problem-file/:id", authenticateTeam, async (req, res) => {
+  try {
+    const fileId = String(req.params.id || "").trim();
+    if (!fileId) {
+      return res.status(400).json({ success: false, error: "INVALID_FILE_ID", message: "File ID is required." });
+    }
+
+    let team = null;
+    if (process.env.MONGODB_URI) {
+      await getDbConnection();
+      const teamId = req.teamSession.teamId;
+      team = await Team.findOne({ id: teamId }).lean();
+    } else if (req.teamSession?.team) {
+      team = req.teamSession.team;
+    }
+
+    if (!team) {
+      return res.status(404).json({ success: false, error: "TEAM_NOT_FOUND", message: "Team record not found." });
+    }
+
+    // Return the file only if the logged-in team's account is enabled
+    if (!team.acc?.enabled) {
+      return res.status(403).json({
+        success: false,
+        error: "ACCOUNT_DISABLED",
+        message: "Your team account is not enabled. Only enabled teams can access problem statement files."
+      });
+    }
+
+    // Check if the team selected this problem statement (either by problemStatementId or by track + problem title)
+    let isSelected = team.problemStatementId && team.problemStatementId === fileId;
+
+    // Retrieve file metadata from event data
+    let fileMeta = null;
+    if (process.env.MONGODB_URI) {
+      const eventDoc = await EventData.findOne({ key: "global_event" }).lean();
+      if (eventDoc && Array.isArray(eventDoc.problemStatementFiles)) {
+        fileMeta = eventDoc.problemStatementFiles.find(item => item.id === fileId);
+      }
+    }
+    if (!fileMeta) {
+      fileMeta = memoryEventData.problemStatementFiles.find(item => item.id === fileId);
+    }
+
+    if (!fileMeta) {
+      return res.status(404).json({ success: false, error: "FILE_NOT_FOUND", message: "Problem statement file not found." });
+    }
+
+    if (!isSelected && team.track && team.problem) {
+      if (fileMeta.track === team.track && fileMeta.title === team.problem) {
+        isSelected = true;
+      }
+    }
+
+    if (!isSelected) {
+      return res.status(403).json({
+        success: false,
+        error: "FORBIDDEN",
+        message: "You can only download the problem statement file for your team's assigned track and problem."
+      });
+    }
+
+    if (fileMeta.active === false) {
+      return res.status(403).json({
+        success: false,
+        error: "FILE_INACTIVE",
+        message: "This problem statement file is currently inactive."
+      });
+    }
+
+    // Retrieve fileData from ProblemFile collection (or memory fallback)
+    let fileDoc = null;
+    if (process.env.MONGODB_URI) {
+      fileDoc = await ProblemFile.findOne({ id: fileId }).lean();
+    }
+    if (!fileDoc) {
+      fileDoc = memoryProblemFiles.get(fileId);
+    }
+
+    if (!fileDoc || !fileDoc.fileData) {
+      return res.status(404).json({ success: false, error: "FILE_CONTENT_NOT_FOUND", message: "Problem statement file content not found." });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        id: fileMeta.id,
+        track: fileMeta.track,
+        title: fileMeta.title,
+        fileName: fileMeta.fileName || fileDoc.fileName,
+        fileType: fileMeta.fileType || fileDoc.fileType,
+        fileData: fileDoc.fileData
+      }
+    });
+  } catch (err) {
+    if (isDatabaseUnavailable(err)) {
+      return databaseUnavailableResponse(res, "Problem file cannot be retrieved because the database is unavailable.");
+    }
+    console.error("Error retrieving team problem file:", err);
+    return res.status(500).json({ success: false, error: "SERVER_ERROR", message: "Failed to retrieve problem file." });
+  }
+});
+
+// GET /api/admin/problem-file/:id - Authenticated admin retrieves problem statement file
+app.get("/api/admin/problem-file/:id", authenticateAdmin, async (req, res) => {
+  try {
+    const fileId = String(req.params.id || "").trim();
+    if (!fileId) {
+      return res.status(400).json({ success: false, error: "INVALID_FILE_ID", message: "File ID is required." });
+    }
+
+    let fileDoc = null;
+    if (process.env.MONGODB_URI) {
+      try {
+        await getDbConnection();
+        fileDoc = await ProblemFile.findOne({ id: fileId }).lean();
+      } catch (_dbErr) {}
+    }
+    if (!fileDoc) {
+      fileDoc = memoryProblemFiles.get(fileId);
+    }
+
+    // Also get metadata if available
+    let fileMeta = null;
+    if (process.env.MONGODB_URI) {
+      try {
+        const eventDoc = await EventData.findOne({ key: "global_event" }).lean();
+        if (eventDoc && Array.isArray(eventDoc.problemStatementFiles)) {
+          fileMeta = eventDoc.problemStatementFiles.find(item => item.id === fileId);
+        }
+      } catch (_dbErr) {}
+    }
+    if (!fileMeta) {
+      fileMeta = memoryEventData.problemStatementFiles.find(item => item.id === fileId);
+    }
+
+    if (!fileDoc || !fileDoc.fileData) {
+      return res.status(404).json({ success: false, error: "FILE_NOT_FOUND", message: "Problem statement file content not found." });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        id: fileId,
+        fileName: fileMeta?.fileName || fileDoc.fileName,
+        fileType: fileMeta?.fileType || fileDoc.fileType,
+        fileData: fileDoc.fileData
+      }
+    });
+  } catch (err) {
+    if (isDatabaseUnavailable(err)) {
+      return databaseUnavailableResponse(res, "Problem file cannot be retrieved because the database is unavailable.");
+    }
+    console.error("Error retrieving admin problem file:", err);
+    return res.status(500).json({ success: false, error: "SERVER_ERROR", message: "Failed to retrieve problem file." });
+  }
+});
+
+// 2 MB in bytes = 2 * 1024 * 1024 = 2,097,152 bytes. In base64 string, max length is ~2,800,000 characters.
+const MAX_PROBLEM_FILE_BYTES = 2 * 1024 * 1024;
+
+function calculateBase64Bytes(base64String) {
+  if (typeof base64String !== "string") return 0;
+  const commaIdx = base64String.indexOf(",");
+  const rawBase64 = commaIdx >= 0 ? base64String.slice(commaIdx + 1) : base64String;
+  const padding = (rawBase64.endsWith("==") ? 2 : rawBase64.endsWith("=") ? 1 : 0);
+  return Math.max(0, Math.floor((rawBase64.length * 3) / 4) - padding);
+}
+
+// PUT /api/admin/problem-file/:id - Authenticated admin uploads or replaces a single problem statement file
+// Accepts up to 2 MB file (request body at most 3 MB)
+app.put("/api/admin/problem-file/:id", authenticateAdmin, async (req, res) => {
+  try {
+    const fileId = String(req.params.id || "").trim();
+    if (!fileId) {
+      return res.status(400).json({ success: false, error: "INVALID_FILE_ID", message: "File ID is required." });
+    }
+
+    const { fileName, fileType, fileData } = req.body || {};
+    if (!fileData || typeof fileData !== "string" || !fileData.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "MISSING_FILE_DATA",
+        message: "fileData (base64 string) is required."
+      });
+    }
+
+    const fileBytes = calculateBase64Bytes(fileData);
+    if (fileBytes > MAX_PROBLEM_FILE_BYTES) {
+      return res.status(400).json({
+        success: false,
+        error: "FILE_TOO_LARGE",
+        message: "The problem statement file exceeds the maximum allowed size of 2 MB."
+      });
+    }
+
+    const cleanFileName = String(fileName || "").slice(0, 255).trim();
+    const cleanFileType = String(fileType || "").slice(0, 20).trim();
+
+    const fileDoc = {
+      id: fileId,
+      fileData,
+      fileName: cleanFileName,
+      fileType: cleanFileType,
+      updatedAt: new Date()
+    };
+
+    let savedToDb = false;
+    if (process.env.MONGODB_URI) {
+      try {
+        await getDbConnection();
+        await ProblemFile.findOneAndUpdate(
+          { id: fileId },
+          fileDoc,
+          { upsert: true, returnDocument: "after" }
+        );
+        savedToDb = true;
+      } catch (dbErr) {
+        if (isDatabaseUnavailable(dbErr)) {
+          console.warn("[ProblemFile] MongoDB write failed due to database unavailability.");
+        } else {
+          console.error("Error saving problem file to MongoDB:", dbErr);
+        }
+      }
+    }
+
+    if (process.env.MONGODB_URI && !savedToDb) {
+      return databaseUnavailableResponse(res, "MongoDB database is currently unreachable. Problem file could not be persisted.");
+    }
+
+    // Always update in-memory fallback
+    memoryProblemFiles.set(fileId, fileDoc);
+
+    return res.status(200).json({
+      success: true,
+      message: "Problem statement file saved successfully.",
+      data: {
+        id: fileId,
+        fileName: cleanFileName,
+        fileType: cleanFileType,
+        sizeBytes: fileBytes
+      }
+    });
+  } catch (err) {
+    if (isDatabaseUnavailable(err)) {
+      return databaseUnavailableResponse(res, "Problem file cannot be saved because the database is unavailable.");
+    }
+    console.error("Error saving admin problem file:", err);
+    return res.status(500).json({
+      success: false,
+      error: "SERVER_ERROR",
+      message: "Failed to save problem statement file."
+    });
+  }
+});
+
+function sanitizeProblemFilesMeta(files) {
+  if (!Array.isArray(files)) return [];
+  return files.map(item => ({
+    id: item.id,
+    track: item.track,
+    title: item.title,
+    description: item.description,
+    fileName: item.fileName,
+    fileType: item.fileType,
+    uploadDate: item.uploadDate,
+    active: item.active !== false
+  }));
+}
+
+// GET /api/event - Public endpoint to retrieve global event data (metadata only for problem statement files, NEVER fileData)
+app.get("/api/event", async (req, res) => {
+  try {
+    if (process.env.MONGODB_URI) {
+      try {
+        await getDbConnection();
+        const doc = await EventData.findOne({ key: "global_event" }).lean();
+        if (doc) {
+          return res.status(200).json({
+            success: true,
+            source: "database",
+            data: {
+              event: doc.event || memoryEventData.event,
+              timeline: doc.timeline || [],
+              rules: doc.rules || [],
+              prizes: doc.prizes || [],
+              judges: doc.judges || [],
+              faq: doc.faq || [],
+              tracks: doc.tracks || [],
+              problemStatementFiles: sanitizeProblemFilesMeta(doc.problemStatementFiles),
+              announcements: doc.announcements || [],
+              updatedAt: doc.updatedAt
+            }
+          });
+        }
+      } catch (dbErr) {
+        console.warn(`[Event Data] MongoDB read failed: ${dbErr.name}`);
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      source: "fallback",
+      data: {
+        event: memoryEventData.event,
+        timeline: memoryEventData.timeline,
+        rules: memoryEventData.rules,
+        prizes: memoryEventData.prizes,
+        judges: memoryEventData.judges,
+        faq: memoryEventData.faq,
+        tracks: memoryEventData.tracks,
+        problemStatementFiles: sanitizeProblemFilesMeta(memoryEventData.problemStatementFiles),
+        announcements: memoryEventData.announcements,
+        updatedAt: memoryEventData.updatedAt
+      }
+    });
+  } catch (err) {
+    console.error("Error in GET /api/event:", err);
+    return res.status(500).json({
+      success: false,
+      error: "SERVER_ERROR",
+      message: "Failed to retrieve event data."
+    });
+  }
+});
+
+
+// PUT /api/event - Protected endpoint (authenticateAdmin) to publish and update global event data
+app.put("/api/event", authenticateAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+
+    // Validate and limit input sizes: keep every PUT /api/event request body strictly under 1 MB
+    const payloadStr = JSON.stringify(body);
+    if (payloadStr.length > 1024 * 1024) {
+      return res.status(400).json({
+        success: false,
+        error: "PAYLOAD_TOO_LARGE",
+        message: "Event data payload exceeds the maximum limit of 1 MB."
+      });
+    }
+
+    const eventObj = body.event && typeof body.event === "object" ? body.event : memoryEventData.event;
+    const cleanEvent = {
+      title: String(eventObj.title || "").slice(0, 200).trim(),
+      about: String(eventObj.about || "").slice(0, 5000).trim(),
+      date: String(eventObj.date || "").slice(0, 50).trim(),
+      time: String(eventObj.time || "").slice(0, 100).trim(),
+      venue: String(eventObj.venue || "").slice(0, 300).trim(),
+      fee: String(eventObj.fee || "500").slice(0, 20).trim(),
+      upiId: String(eventObj.upiId || "").slice(0, 100).trim(),
+      payeeName: String(eventObj.payeeName || "").slice(0, 100).trim(),
+      contact: String(eventObj.contact || "").slice(0, 500).trim(),
+      qrImage: typeof eventObj.qrImage === "string" ? eventObj.qrImage.slice(0, 1500000) : ""
+    };
+
+    const cleanPairs = (arr, maxItems = 100) => {
+      if (!Array.isArray(arr)) return [];
+      return arr.slice(0, maxItems).map(item => ({
+        t: String(item?.t || "").slice(0, 200).trim(),
+        d: String(item?.d || "").slice(0, 3000).trim()
+      })).filter(item => item.t || item.d);
+    };
+
+    const cleanTracks = (arr, maxItems = 50) => {
+      if (!Array.isArray(arr)) return [];
+      return arr.slice(0, maxItems).map(track => ({
+        name: String(track?.name || "").slice(0, 150).trim(),
+        problems: Array.isArray(track?.problems)
+          ? track.problems.slice(0, 100).map(p => String(p || "").slice(0, 300).trim()).filter(Boolean)
+          : []
+      })).filter(track => track.name);
+    };
+
+    // Separate file metadata from file content, and enforce 2 MB limit per file
+    // Include fileData only for a file that was newly uploaded or replaced in this save
+    const separateFileContents = [];
+    const cleanProblemFilesMeta = [];
+    const incomingFileIds = new Set();
+
+    if (Array.isArray(body.problemStatementFiles)) {
+      for (const item of body.problemStatementFiles.slice(0, 50)) {
+        if (!item || !item.track || !item.title) continue;
+
+        const id = String(item.id || "").slice(0, 100).trim() || `ps-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+        const fileName = String(item.fileName || "").slice(0, 255).trim();
+        const fileType = String(item.fileType || "").slice(0, 20).trim();
+        incomingFileIds.add(id);
+
+        if (typeof item.fileData === "string" && item.fileData.trim()) {
+          const fileBytes = calculateBase64Bytes(item.fileData);
+          if (fileBytes > MAX_PROBLEM_FILE_BYTES) {
+            return res.status(400).json({
+              success: false,
+              error: "FILE_TOO_LARGE",
+              message: `The problem statement file "${fileName || item.title}" exceeds the maximum allowed size of 2 MB.`
+            });
+          }
+
+          separateFileContents.push({
+            id,
+            fileData: item.fileData,
+            fileName,
+            fileType,
+            updatedAt: new Date()
+          });
+        }
+
+        cleanProblemFilesMeta.push({
+          id,
+          track: String(item.track || "").slice(0, 150).trim(),
+          title: String(item.title || "").slice(0, 200).trim(),
+          description: String(item.description || "").slice(0, 3000).trim(),
+          fileName,
+          fileType,
+          uploadDate: String(item.uploadDate || "").slice(0, 30).trim(),
+          active: item.active !== false
+        });
+      }
+    }
+
+    const updatePayload = {
+      key: "global_event",
+      event: cleanEvent,
+      timeline: cleanPairs(body.timeline, 50),
+      rules: cleanPairs(body.rules, 50),
+      prizes: cleanPairs(body.prizes, 50),
+      judges: cleanPairs(body.judges, 50),
+      faq: cleanPairs(body.faq, 50),
+      tracks: cleanTracks(body.tracks, 50),
+      problemStatementFiles: cleanProblemFilesMeta,
+      announcements: cleanPairs(body.announcements, 100),
+      updatedAt: new Date()
+    };
+
+    let savedToDb = false;
+
+    if (process.env.MONGODB_URI) {
+      try {
+        await getDbConnection();
+
+        // One-time migration: check if legacy event document has problemStatementFiles with fileData, move to ProblemFile
+        try {
+          const existingEventDoc = await EventData.findOne({ key: "global_event" }).lean();
+          if (existingEventDoc && Array.isArray(existingEventDoc.problemStatementFiles)) {
+            let hadLegacyData = false;
+            for (const legItem of existingEventDoc.problemStatementFiles) {
+              if (legItem && legItem.id && legItem.fileData) {
+                hadLegacyData = true;
+                const existingProblemFile = await ProblemFile.findOne({ id: legItem.id }).lean();
+                if (!existingProblemFile) {
+                  await ProblemFile.create({
+                    id: legItem.id,
+                    fileData: legItem.fileData,
+                    fileName: legItem.fileName || "",
+                    fileType: legItem.fileType || "",
+                    updatedAt: new Date()
+                  });
+                }
+              }
+            }
+            if (hadLegacyData) {
+              // Strip legacy fileData from EventData problemStatementFiles
+              const sanitizedLegacyFiles = sanitizeProblemFilesMeta(existingEventDoc.problemStatementFiles);
+              await EventData.updateOne(
+                { key: "global_event" },
+                { $set: { problemStatementFiles: sanitizedLegacyFiles } }
+              );
+            }
+
+            // Delete ProblemFile documents only when admin deletes that problem statement
+            const existingIds = existingEventDoc.problemStatementFiles.map(f => f.id).filter(Boolean);
+            const deletedIds = existingIds.filter(id => !incomingFileIds.has(id));
+            if (deletedIds.length > 0) {
+              await ProblemFile.deleteMany({ id: { $in: deletedIds } });
+            }
+          }
+        } catch (migrationErr) {
+          console.warn(`[Event Data Migration] Warning: ${migrationErr.message}`);
+        }
+
+        // 1. Save new or replaced file contents to separate ProblemFile collection (keeps omitted fileData unchanged)
+        for (const fileItem of separateFileContents) {
+          await ProblemFile.findOneAndUpdate(
+            { id: fileItem.id },
+            fileItem,
+            { upsert: true, returnDocument: "after" }
+          );
+        }
+
+        // 2. Save event metadata (without fileData)
+        const updated = await EventData.findOneAndUpdate(
+          { key: "global_event" },
+          updatePayload,
+          { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
+        ).lean();
+
+        savedToDb = true;
+        Object.assign(memoryEventData, updatePayload);
+
+        for (const fileItem of separateFileContents) {
+          memoryProblemFiles.set(fileItem.id, fileItem);
+        }
+        // In memory: delete files that are no longer in problem statements
+        for (const key of memoryProblemFiles.keys()) {
+          if (!incomingFileIds.has(key)) {
+            memoryProblemFiles.delete(key);
+          }
+        }
+
+        return res.status(200).json({
+          success: true,
+          database: "connected",
+          message: "Event data published and saved to MongoDB successfully.",
+          data: {
+            event: updated.event,
+            timeline: updated.timeline,
+            rules: updated.rules,
+            prizes: updated.prizes,
+            judges: updated.judges,
+            faq: updated.faq,
+            tracks: updated.tracks,
+            problemStatementFiles: sanitizeProblemFilesMeta(updated.problemStatementFiles),
+            announcements: updated.announcements,
+            updatedAt: updated.updatedAt
+          }
+        });
+      } catch (dbErr) {
+        console.warn(`[Event Data] MongoDB write failed: ${dbErr.name}`);
+      }
+    }
+
+    if (process.env.MONGODB_URI && !savedToDb) {
+      return databaseUnavailableResponse(res, "MongoDB database is currently unreachable. Event data could not be persisted to the database.");
+    }
+
+    // In-memory fallback if no DB configured
+    Object.assign(memoryEventData, updatePayload);
+    for (const fileItem of separateFileContents) {
+      memoryProblemFiles.set(fileItem.id, fileItem);
+    }
+    // Delete problem files that were removed from the problem statements
+    for (const key of memoryProblemFiles.keys()) {
+      if (!incomingFileIds.has(key)) {
+        memoryProblemFiles.delete(key);
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      database: "fallback",
+      message: "Event data saved in-memory (persistent database storage not configured).",
+      data: {
+        ...memoryEventData,
+        problemStatementFiles: sanitizeProblemFilesMeta(memoryEventData.problemStatementFiles)
+      }
+    });
+
+  } catch (err) {
+    console.error("Error updating event data:", err);
+    return res.status(500).json({
+      success: false,
+      error: "SERVER_ERROR",
+      message: "Internal server error updating event data."
     });
   }
 });
