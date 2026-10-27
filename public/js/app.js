@@ -1,6 +1,6 @@
 /* 26 HRS HACKATHON – NEXUS – Excel Engineering College (Autonomous), Dept. of IT & Binary Brains Club. Data lives in localStorage (demo backend). */
 const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const KEY='h24db',TBA='To be announced',REGISTRATION_FEE_PER_PERSON=500;
+const KEY='h24db',TBA='To be announced';
 const WHATSAPP_GROUP_LINK='https://chat.whatsapp.com/BJ3qXPchD6JDrv3ADqXkqT';
 const DEF={event:{
   title:'26 HRS HACKATHON – NEXUS',
@@ -8,9 +8,6 @@ const DEF={event:{
   date:'2026-10-30',
   time:'10:00 AM (Start: Oct 30, 10:00 AM · End: Oct 31, 1:00 PM)',
   venue:'IT Lab, B Block, Excel Engineering College (Autonomous), Komarapalayam',
-  fee:'500',
-  upiId:'suba.arni@okaxis',
-  payeeName:'Banu Priya',
   contact:'Coordinators: Mrs. Banupriya (AP/IT) · Mrs. Divya K. (AP/IT) | Excel Engineering College (Autonomous), Komarapalayam – 637303, Namakkal District'
 },
 timeline:[
@@ -23,7 +20,7 @@ timeline:[
   {t:'Day 2 – 01:00 PM (Oct 31)',d:'Valedictory Ceremony & Prize Distribution'}
 ],
 rules:[
-  {t:'Eligibility & Team Size',d:'Open to students of all years. Each team must consist of 2 to 4 members, including 1 Team Leader. Registration is ₹500 per participant.'},
+  {t:'Eligibility & Team Size',d:'Open to students of all years. Each team must consist of 2 to 4 members, including 1 Team Leader.'},
   {t:'Hackathon Duration',d:'Continuous 26-hour hackathon starting October 30, 2026 at 10:00 AM and concluding October 31, 2026 at 1:00 PM.'},
   {t:'Venue & Conduct',d:'The event will be held physically at IT Lab, B Block. Participants must maintain academic integrity and professional conduct.'},
   {t:'Evaluation Criteria',d:'Projects are evaluated by industry experts on innovation, technical implementation, feasibility, presentation, and team collaboration.'}
@@ -40,7 +37,7 @@ judges:[
 ],
 faq:[
   {t:'Who can participate in 26 HRS HACKATHON – NEXUS?',d:'Students from all years across engineering and technology disciplines are eligible to participate.'},
-  {t:'What is the required team size?',d:'Each team must have 2 to 4 members, including the Team Leader. Registration costs ₹500 per participant.'},
+  {t:'What is the required team size?',d:'Each team must have 2 to 4 members, including the Team Leader.'},
   {t:'Where will the hackathon take place?',d:'The event will be conducted at IT Lab, B Block, Excel Engineering College (Autonomous), Komarapalayam.'},
   {t:'When does the event start and end?',d:'It begins on October 30, 2026 at 10:00 AM IST and concludes on October 31, 2026 at 1:00 PM IST (26 hours duration).'},
   {t:'Who are the event coordinators?',d:'Faculty Coordinators: Mrs. Banupriya (AP/IT) and Mrs. Divya K. (AP/IT), Department of Information Technology.'}
@@ -82,16 +79,12 @@ if(db.admin && db.admin.pw){delete db.admin.pw;try{localStorage.setItem(KEY,JSON
 // Security hygiene: Ensure no team acc.password is ever persisted in localStorage
 if(Array.isArray(db.teams)){db.teams.forEach(t=>{if(t.acc&&'password' in t.acc)delete t.acc.password;});}
 db.event={...DEF.event,...(db.event||{})};
-db.event.fee=String(REGISTRATION_FEE_PER_PERSON);
 if(!db.event.title||db.event.title==='24H Hackathon')db.event.title=DEF.event.title;
 if(!db.event.about||db.event.about.includes('Edit the hackathon description'))db.event.about=DEF.event.about;
 if(!db.event.date)db.event.date=DEF.event.date;
 if(!db.event.time||db.event.time===TBA)db.event.time=DEF.event.time;
 if(!db.event.venue||db.event.venue===TBA)db.event.venue=DEF.event.venue;
 if(!db.event.contact||db.event.contact.includes('Add contact details'))db.event.contact=DEF.event.contact;
-if(!db.event.fee)db.event.fee=DEF.event.fee;
-if(!db.event.upiId)db.event.upiId=DEF.event.upiId||'suba.arni@okaxis';
-if(!db.event.payeeName)db.event.payeeName=DEF.event.payeeName||'Banu Priya';
 if(!db.timeline?.length)db.timeline=[...DEF.timeline];
 if(!db.rules?.length)db.rules=[...DEF.rules];
 if(!db.prizes?.length)db.prizes=[...DEF.prizes];
@@ -420,7 +413,6 @@ function toast(m){const d=document.createElement('div');d.className='glass';d.st
 function openModal(h){const m=$('#modal');m.innerHTML=`<div class="glass">${h}</div>`;m.classList.remove('hide')}
 const closeModal=()=>$('#modal').classList.add('hide');
 let whatsappCloseTimer;
-let paymentCloseTimer;
 let eventSyncStatus = 'idle'; // 'idle' | 'syncing' | 'synced' | 'error'
 let eventSyncError = '';
 
@@ -525,67 +517,6 @@ async function publishEventDataToBackend() {
   return json;
 }
 
-async function fetchBackendPaymentSettings() {
-  try {
-    const res = await fetch('/api/payment-settings');
-    if (!res.ok) return null;
-    const json = await res.json();
-    if (json.success && json.data) {
-      return json.data;
-    }
-  } catch (e) {
-    console.warn('Could not fetch backend payment settings:', e.message);
-  }
-  return null;
-}
-
-async function syncPaymentSettingsOnLoad() {
-  const data = await fetchBackendPaymentSettings();
-  if (data) {
-    let changed = false;
-    if (data.upiId && data.upiId !== db.event.upiId) { db.event.upiId = data.upiId; changed = true; }
-    if (data.payeeName && data.payeeName !== db.event.payeeName) { db.event.payeeName = data.payeeName; changed = true; }
-    if (data.qrImage) {
-      if (db.event.qrImage !== data.qrImage) { db.event.qrImage = data.qrImage; changed = true; }
-    } else if (data.qrImage === '' && db.event.qrImage) {
-      delete db.event.qrImage;
-      changed = true;
-    }
-    if (changed) {
-      save();
-      view();
-    }
-  }
-}
-
-const DEFAULT_PAYMENT_UPI_ID='suba.arni@okaxis';
-const DEFAULT_PAYMENT_PAYEE_NAME='Banu Priya';
-const getPaymentUpiId=()=>(db.event?.upiId||DEFAULT_PAYMENT_UPI_ID);
-const getPaymentPayeeName=()=>(db.event?.payeeName||DEFAULT_PAYMENT_PAYEE_NAME);
-const getPaymentUpiUri=(amount=getRegistrationFee())=>{
-  const pa=getPaymentUpiId();
-  const pn=getPaymentPayeeName();
-  if(!pa||pa==='YOUR_UPI_ID')return '';
-  return 'upi://pay?pa='+encodeURIComponent(pa)+
-         '&pn='+encodeURIComponent(pn)+
-         '&am='+encodeURIComponent(amount)+
-         '&cu=INR&tn='+encodeURIComponent('26HRS HACKATHON REGISTRATION');
-};
-function triggerPaymentUpi(amount){
-  const uri=getPaymentUpiUri(amount);
-  if(!uri){
-    toast('Recipient UPI ID is not configured. Please contact the administrator.');
-    return;
-  }
-  window.location.href=uri;
-}
-const DEFAULT_PAYMENT_FEE=String(REGISTRATION_FEE_PER_PERSON);
-const getRegistrationFee=()=>DEFAULT_PAYMENT_FEE;
-const formatRupees=v=>{const n=Number(v||DEFAULT_PAYMENT_FEE);const hasDecimals=String(v).includes('.')&&String(v).split('.')[1]!=='00';return '₹'+n.toLocaleString('en-IN',{minimumFractionDigits:hasDecimals?2:0,maximumFractionDigits:2});};
-const DEFAULT_PAYMENT_QR='assets/images/payment-qr.jpe';
-const getPaymentQrImage=()=>(db.event?.qrImage||DEFAULT_PAYMENT_QR);
-const PAYMENT_QR_PLACEHOLDER_TEXT='24H Hackathon payment QR code';
-const PAYMENT_QR_PLACEHOLDER=DEFAULT_PAYMENT_QR;
 function openWhatsAppPopup(){
  const popup=$('#whatsapp-popup');
  if(!popup)return;
@@ -610,12 +541,7 @@ function closeWhatsAppPopup(){
   $('#whatsapp-trigger')?.focus();
  },220);
 }
-function openPaymentPopup(){const popup=$('#payment-popup');if(!popup)return;clearTimeout(paymentCloseTimer);popup.hidden=false;popup.classList.remove('is-closing');requestAnimationFrame(()=>popup.classList.add('is-open'));popup.setAttribute('aria-hidden','false')}
-function closePaymentPopup(){const popup=$('#payment-popup');if(!popup||popup.hidden)return;popup.classList.remove('is-open');popup.classList.add('is-closing');popup.setAttribute('aria-hidden','true');paymentCloseTimer=setTimeout(()=>{popup.hidden=true;popup.classList.remove('is-closing');$('#payment-trigger')?.focus()},260)}
-function fallbackCopyPaymentUpi(){const input=document.createElement('textarea');input.value=getPaymentUpiId();input.setAttribute('readonly','');input.style.cssText='position:fixed;left:-9999px;top:0';document.body.append(input);input.select();const copied=document.execCommand('copy');input.remove();return copied}
-async function copyPaymentUpi(){const button=$('#copy-upi');if(!button)return;try{if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(getPaymentUpiId());else if(!fallbackCopyPaymentUpi())throw new Error('Clipboard access is unavailable');button.textContent='Copied ✓';setTimeout(()=>{if(button.isConnected)button.textContent='COPY UPI ID'},1800)}catch(error){try{if(fallbackCopyPaymentUpi()){button.textContent='Copied ✓';setTimeout(()=>{if(button.isConnected)button.textContent='COPY UPI ID'},1800);return}}catch(fallbackError){console.error('Could not copy UPI ID:',fallbackError)}console.error('Could not copy UPI ID:',error);toast('Could not copy UPI ID. Please copy it manually.')} }
-function openPaymentRegistration(){closePaymentPopup();reg={step:1,d:{teamSize:2},participants:[],submitting:false,error:''};go('register');if(location.hash==='#/register'){view();setTimeout(()=>document.querySelector('form')?.scrollIntoView({behavior:'smooth'}),80)}}
-addEventListener('keydown',e=>{if(e.key==='Escape'){closeWhatsAppPopup();closePaymentPopup()}});
+addEventListener('keydown',e=>{if(e.key==='Escape'){closeWhatsAppPopup()}});
 /* ---------- chrome ---------- */
 function chrome(){
  const r=location.hash.slice(2)||'home';
@@ -637,20 +563,17 @@ function home(){const e=db.event,L=(a,f,t)=>a.length?a.map(f).join(''):empty(t);
  return `<section class="hero"><h1>${esc(e.title)}</h1><h3>Department of Information Technology & Binary Brains Club<br>Excel Engineering College (Autonomous), Komarapalayam</h3>
  <p>${esc(e.about)}</p><div class="cd" id="cd"></div>
  <div class="hero-actions"><button class="btn" onclick="go('register')">Register Now</button><button class="btn ghost" onclick="go('home','about')">View Details</button></div></section>
- <section id="about"><h2>About Event</h2><div class="glass"><p>${esc(e.about)}</p><p style="color:var(--mu)"><b>Date:</b> ${esc(e.date)} · <b>Time:</b> ${esc(e.time)}<br><b>Venue:</b> ${esc(e.venue)} · <b>Registration Fee:</b> ₹500 per participant (2–4 members)</p></div>
- <div class="grid" style="margin-top:16px">${['26 Hours Non-Stop','2–4 Members per Team','₹500 per Participant','Technical Innovation','Mentorship: United Soft Tech','Prize Pool: ₹10,000','Students from All Years'].map(x=>`<div class="glass"><h3>${x}</h3></div>`).join('')}</div></section>
+ <section id="about"><h2>About Event</h2><div class="glass"><p>${esc(e.about)}</p><p style="color:var(--mu)"><b>Date:</b> ${esc(e.date)} · <b>Time:</b> ${esc(e.time)}<br><b>Venue:</b> ${esc(e.venue)}</p></div>
+ <div class="grid" style="margin-top:16px">${['26 Hours Non-Stop','2–4 Members per Team','Technical Innovation','Mentorship: United Soft Tech','Prize Pool: ₹10,000','Students from All Years'].map(x=>`<div class="glass"><h3>${x}</h3></div>`).join('')}</div></section>
  <section id="timeline"><h2>Timeline</h2><div class="tl">${L(db.timeline,x=>`<div class="glass"><b>${esc(x.t)}</b><p>${esc(x.d)}</p></div>`,'Timeline not published yet')}</div></section>
  <section id="rules"><h2>Rules & Guidelines</h2>${L(db.rules,x=>`<details class="glass"><summary>${esc(x.t)}</summary><p>${esc(x.d)}</p></details>`,'Rules not published yet')}</section>
  <section id="prizes"><h2>Prizes & Recognition</h2><div class="grid">${L(db.prizes,x=>`<div class="glass prize"><h3>${esc(x.t)}</h3><b>${esc(x.d)}</b></div>`,'Prizes not published yet')}</div></section>
  <section id="judges"><h2>Guests & Industry Mentors</h2><div class="grid">${L(db.judges,x=>`<div class="glass"><div class="av"></div><h3>${esc(x.t)}</h3><p style="color:var(--mu)">${esc(x.d)}</p></div>`,'Judges and mentors not published yet')}</div></section>
  <section id="faq"><h2>Frequently Asked Questions</h2>${L(db.faq,x=>`<details class="glass"><summary>${esc(x.t)}</summary><p>${esc(x.d)}</p></details>`,'FAQ not published yet')}</section>
- <button id="payment-trigger" class="payment-trigger" type="button" onclick="openPaymentPopup()" aria-label="Payment QR"><span class="payment-tooltip" role="tooltip">Payment QR</span><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 4h9v9H4zM7 7v3h3V7zM19 4h9v9h-9zM22 7v3h3V7zM4 19h9v9H4zM7 22v3h3v-3zM17 17h4v4h-4zM23 17h5v3h-5zM17 23h3v5h-3zM22 23h6v2h-6zM25 26h3v2h-3z" fill="currentColor"/></svg></button>
  <button id="whatsapp-trigger" class="whatsapp-trigger" type="button" onclick="openWhatsAppPopup()" aria-label="Join WhatsApp Group">
   <span class="whatsapp-tooltip" role="tooltip">Join WhatsApp Group</span>
   <svg viewBox="0 0 32 32" aria-hidden="true"><path fill="currentColor" d="M16.02 3.2A12.66 12.66 0 0 0 5.1 22.27L3.3 28.8l6.68-1.75A12.65 12.65 0 1 0 16.02 3.2Zm0 22.98c-1.97 0-3.9-.53-5.57-1.53l-.4-.24-3.97 1.04 1.06-3.86-.26-.41a10.3 10.3 0 1 1 9.14 5Zm5.65-7.72c-.31-.16-1.84-.91-2.13-1.02-.29-.1-.5-.16-.71.16-.21.31-.81 1.02-.99 1.23-.18.21-.36.23-.67.08-.31-.16-1.33-.49-2.53-1.55-.94-.84-1.57-1.87-1.75-2.18-.18-.31-.02-.48.14-.64.14-.14.31-.36.47-.54.16-.18.21-.31.31-.52.1-.21.05-.39-.03-.55-.08-.16-.71-1.71-.97-2.34-.25-.61-.51-.53-.71-.54h-.61c-.21 0-.55.08-.84.39-.29.31-1.1 1.07-1.1 2.62 0 1.55 1.13 3.05 1.28 3.26.16.21 2.22 3.39 5.37 4.75.75.32 1.33.51 1.79.65.75.24 1.43.21 1.97.13.6-.09 1.84-.75 2.1-1.47.26-.73.26-1.35.18-1.47-.08-.13-.29-.21-.6-.37Z"/></svg>
  </button>
- <div id="payment-popup" class="payment-overlay" hidden aria-hidden="true" onclick="if(event.target===this)closePaymentPopup()"><section class="payment-dialog" role="dialog" aria-modal="true" aria-labelledby="payment-popup-title"><button class="payment-close" type="button" onclick="closePaymentPopup()" aria-label="Close">×</button><p class="payment-eyebrow">26 HRS HACKATHON – NEXUS</p><h2 id="payment-popup-title">EVENT REGISTRATION PAYMENT</h2><p class="payment-popup-subtitle">Registration is ₹500 per participant. Select a team size in the registration form to calculate the exact total.</p><div class="payment-qr-frame popup-qr-frame"><img class="payment-qr-image" src="${esc(getPaymentQrImage())}" alt="${PAYMENT_QR_PLACEHOLDER_TEXT}" onerror="this.style.display='none';this.nextElementSibling.style.display='grid'"><div class="payment-qr-placeholder" role="img" aria-label="${PAYMENT_QR_PLACEHOLDER_TEXT}" hidden>${PAYMENT_QR_PLACEHOLDER_TEXT}</div></div>
-<p class="payment-detail payment-qr-note">This QR is a static image. Use the registration page to see the amount for your team and to open a UPI payment with that amount prefilled.</p><p class="payment-popup-upi"><b>UPI ID:</b> ${esc(getPaymentUpiId())}</p><p class="payment-popup-upi"><b>Payee Name:</b> ${esc(getPaymentPayeeName())}</p><div class="payment-popup-actions"><button id="copy-upi" class="btn" type="button" onclick="copyPaymentUpi()">COPY UPI ID</button><button class="btn ghost" type="button" onclick="openPaymentRegistration()">OPEN REGISTRATION</button></div></section></div>
  <div id="whatsapp-popup" class="whatsapp-overlay" hidden aria-hidden="true" onclick="if(event.target===this)closeWhatsAppPopup()">
   <section class="whatsapp-dialog" role="dialog" aria-modal="true" aria-labelledby="whatsapp-title" aria-describedby="whatsapp-description">
    <button class="whatsapp-close" type="button" onclick="closeWhatsAppPopup()" aria-label="Close popup">×</button>
@@ -686,7 +609,6 @@ const MOB='pattern="[0-9]{10}" title="10-digit mobile number"';
 const trackOptions=(selected,includeCurrent=false)=>{const tracks=[...db.tracks];if(includeCurrent&&selected&&!tracks.some(t=>t.name===selected))tracks.push({name:selected,problems:[]});return `<option value="">Not selected yet</option>${tracks.map(t=>`<option value="${esc(t.name)}" ${selected===t.name?'selected':''}>${esc(t.name)}</option>`).join('')}`};
 const problemOptions=(trackName,selected,includeCurrent=false)=>{const problems=[...(db.tracks.find(t=>t.name===trackName)?.problems||[])];if(includeCurrent&&selected&&!problems.includes(selected))problems.push(selected);return `<option value="">Not selected yet</option>${problems.map(problem=>`<option value="${esc(problem)}" ${selected===problem?'selected':''}>${esc(problem)}</option>`).join('')}`};
 const registrationSize=()=>Number(reg.d.teamSize)||2;
-const registrationTotal=()=>registrationSize()*REGISTRATION_FEE_PER_PERSON;
 function updateRegistrationTeamSize(value){
  const size=Number(value);
  if(![2,3,4].includes(size))return;
@@ -706,12 +628,6 @@ function updateRegistrationTeamSize(value){
   reg.participants=Array.from({length:size},(_,i)=>reg.participants[i]||{year:'1'});
   reg.error='';view();return;
  }
- const count=$('#registration-member-count'),total=$('#registration-total');
- if(count)count.textContent=String(size);
- if(total)total.textContent=formatRupees(size*REGISTRATION_FEE_PER_PERSON);
-}
-function registrationFeeSummary(size,total){
- return `<div class="fee-summary" id="register-fee-summary" aria-live="polite"><p><span>Registration fee per person</span><b>${formatRupees(REGISTRATION_FEE_PER_PERSON)}</b></p><p><span>Number of team members</span><b id="registration-member-count">${size}</b></p><p class="fee-total"><span>Total amount payable</span><b id="registration-total">${formatRupees(total)}</b></p></div>`;
 }
 function participantCard(participant,index){
  const leader=index===0,label=leader?'Team Leader':'Team Member '+index;
@@ -729,37 +645,20 @@ function participantSummary(participant,index){
  return `<li><b>${index===0?'Leader':'Member '+index}:</b> ${esc(participant.name)} · ${esc(participant.email)} · ${esc(participant.mobile)}<br><span>${esc(participant.college)} · ${esc(participant.department)} · Year ${esc(participant.year)}</span></li>`;
 }
 function register(){
- const d=reg.d,s=reg.step,names=['Team','Participants','Payment','Done'],size=registrationSize(),total=size*REGISTRATION_FEE_PER_PERSON;
+ const d=reg.d,s=reg.step,names=['Team','Members','Done'],size=registrationSize();
  let h=`<section class="narrow registration-flow"><h2>Team Registration</h2><div class="steps">${names.map((n,i)=>`<span class="${i+1===s?'on':''}">${i+1}. ${n}</span>`).join('')}</div><div class="glass">`;
  if(s===1)h+=`<form id="registration-step1-form" onsubmit="return rs(event,1)"><div class="two">
  ${F('Team Name','team',d.team,'text','maxlength="100"')}
- <label>Team Size<select name="teamSize" required onchange="updateRegistrationTeamSize(this.value)">${[2,3,4].map(count=>`<option value="${count}" ${size===count?'selected':''}>${count} Members — ${formatRupees(count*REGISTRATION_FEE_PER_PERSON)}</option>`).join('')}</select></label>
- </div>${registrationFeeSummary(size,total)}<button class="btn">Next: Participant Details</button></form>`;
+ <label>Team Size<select name="teamSize" required onchange="updateRegistrationTeamSize(this.value)">${[2,3,4].map(count=>`<option value="${count}" ${size===count?'selected':''}>${count} Members</option>`).join('')}</select></label>
+ </div><button class="btn">Next: Member Details</button></form>`;
  if(s===2){
-  h+=`<form id="registration-step2-form" onsubmit="return rs(event,2)"><div class="two"><label>Team Size<select name="teamSize" required onchange="updateRegistrationTeamSize(this.value)">${[2,3,4].map(count=>`<option value="${count}" ${size===count?'selected':''}>${count} Members — ${formatRupees(count*REGISTRATION_FEE_PER_PERSON)}</option>`).join('')}</select></label></div>${registrationFeeSummary(size,total)}<p class="registration-intro">Enter complete details for all ${size} participants. The team leader is participant 1.</p>`;
+  h+=`<form id="registration-step2-form" onsubmit="return submitRegistration(event)"><div class="two"><label>Team Size<select name="teamSize" required onchange="updateRegistrationTeamSize(this.value)">${[2,3,4].map(count=>`<option value="${count}" ${size===count?'selected':''}>${count} Members</option>`).join('')}</select></label></div><p class="registration-intro">Enter complete details for all ${size} participants. The team leader is participant 1.</p>`;
   for(let i=0;i<size;i++)h+=participantCard(reg.participants[i],i);
-  h+=`${reg.error?`<p class="registration-error" role="alert">${esc(reg.error)}</p>`:''}<button type="button" class="btn ghost" onclick="reg.step=1;reg.error='';view()">Back</button> <button class="btn">Review payment</button></form>`;
+  h+=`${reg.error?`<p class="registration-error" role="alert">${esc(reg.error)}</p>`:''}<button type="button" class="btn ghost" onclick="reg.step=1;reg.error='';view()">Back</button> <button class="btn" type="submit" ${reg.submitting?'disabled':''}>${reg.submitting?'Submitting…':'Submit Registration'}</button></form>`;
  }
  if(s===3){
-  const participants=reg.participants||[],configuredUpi=getPaymentUpiId(),qr=getPaymentQrImage();
-  h+=`<form id="registration-payment-form" onsubmit="return submitRegistration(event)"><div class="registration-review"><h3>Registration summary</h3><p><b>Team:</b> ${esc(d.team)}</p><p><b>Team size:</b> ${size} participants</p><ul>${participants.map(participantSummary).join('')}</ul></div>
-  ${registrationFeeSummary(size,total)}
-  <div class="payment-card registration-payment"><h3>PAYMENT</h3><p class="payment-subtitle">Pay the amount shown for this team</p><div class="payment-qr-frame"><img class="payment-qr-image" src="${esc(qr)}" alt="Existing NEXUS payment QR code. Enter ${formatRupees(total)} in your payment app." onerror="this.style.display='none';this.nextElementSibling.style.display='grid'"><div class="payment-qr-placeholder" role="img" aria-label="Payment QR unavailable" hidden>${PAYMENT_QR_PLACEHOLDER_TEXT}</div></div>
-  <p class="payment-detail"><b>Team size:</b> ${size} · <b>Fee per participant:</b> ${formatRupees(REGISTRATION_FEE_PER_PERSON)}</p>
-  <p class="payment-detail payment-qr-note">This is the existing static QR image. Scan it, verify the recipient, and enter ${formatRupees(total)} manually. The QR image itself does not change with team size.</p>
-  ${configuredUpi&&configuredUpi!=='YOUR_UPI_ID'?`<button type="button" class="btn pay-now-btn" onclick="triggerPaymentUpi(${total})">Open UPI app with ${formatRupees(total)} prefilled</button><p class="payment-detail">Confirm the configured payee and amount in your UPI app before paying.</p><p class="payment-detail"><b>UPI ID:</b> ${esc(configuredUpi)} · <b>Payee:</b> ${esc(getPaymentPayeeName())}</p>`:''}
-  </div>
-  <label>Payment method<select name="method" required>${['UPI','Bank Transfer','Cash'].map(method=>`<option value="${method}" ${String(d.method||'UPI')===method?'selected':''}>${method}</option>`).join('')}</select></label>
-  <label>Transaction / UTR reference (optional)<input name="utr" maxlength="100" value="${esc(d.utr||'')}" autocomplete="off"></label>
-  <label>Payment screenshot (optional)<input type="file" name="shot" accept="image/jpeg,image/png,image/webp"></label>
-  <p class="payment-pending-note">Your registration will be saved with payment status <b>Pending</b> until an administrator verifies payment. Submitting this form or an image does not mark payment as complete.</p>
-  ${reg.error?`<p class="registration-error" role="alert">${esc(reg.error)}</p>`:''}
-  <label class="payment-confirm"><input type="checkbox" name="pendingAcknowledged" value="yes" required><span>I understand my payment status remains pending until verified by the administrator.</span></label>
-  <button class="btn" type="submit" ${reg.submitting?'disabled':''}>${reg.submitting?'Submitting…':'Submit Registration'}</button> <button type="button" class="btn ghost" onclick="reg.step=2;reg.error='';view()">Back</button></form>`;
- }
- if(s===4){
   const t=reg.done;
-  h+=`<div class="ok"><div class="tick">✓</div><h3>Registration received</h3><p>Registration reference: <b>${esc(t.id)}</b> · ${esc(t.name)}</p><p>${t.teamSize} participants · Total: <b>${formatRupees(t.totalAmount)}</b></p><p>Payment status: ${badge(t.pay.status)}</p><p class="payment-pending-note">Your registration is saved. Payment remains pending until an administrator verifies it.</p><p style="color:var(--mu)">Team account access will be available after admin approval. Team login: leader name and the registered mobile number.</p><button class="btn" onclick="reg={step:1,d:{teamSize:2},participants:[],submitting:false,error:''};go('login')">Go to Login</button></div>`;
+  h+=`<div class="ok"><div class="tick">✓</div><h3>Registration Successful</h3><p>Team ID: <b>${esc(t.id)}</b> · ${esc(t.name)}</p><p>${t.teamSize} participants · Status: ${badge(t.status)}</p><p style="color:var(--mu);margin-top:12px">Your team registration is complete. You can log in now using your <b>Team Leader Name</b> (${esc(t.leader)}) and <b>Mobile Number</b>.</p><button class="btn" onclick="reg={step:1,d:{teamSize:2},participants:[],submitting:false,error:''};go('login')">Go to Login</button></div>`;
  }
  return h+'</div></section>';
 }
@@ -773,157 +672,40 @@ function rs(ev,s){
   if(d.team.length<2){reg.error='Enter a team name with at least 2 characters.';view();return false}
   reg.error='';reg.participants=Array.from({length:teamSize},(_,i)=>reg.participants[i]||{year:'1'});reg.step=2;view();return false;
  }
- if(s===2){
-  const participants=Array.from({length:registrationSize()},(_,i)=>({
-   name:String(f[`p${i}_name`]||'').trim(),email:lowerEmail(f[`p${i}_email`]),
-   mobile:String(f[`p${i}_mobile`]||'').trim(),college:String(f[`p${i}_college`]||'').trim(),
-   department:String(f[`p${i}_department`]||'').trim(),year:String(f[`p${i}_year`]||'')
-  }));
-  reg.participants=participants;
-  const emails=participants.map(person=>person.email);
-  if(emails.some((email,index)=>emails.indexOf(email)!==index)){reg.error='Each participant must use a different email address.';view();return false}
-  if(emails.some(email=>teamEmailExists(email))){reg.error='A participant email is already registered. Use a different email address.';view();return false}
-  reg.participants=participants;reg.error='';reg.step=3;view();return false;
- }
  return false;
 }
-function compressScreenshot(file){
- return new Promise(async (resolve,reject)=>{
-  const validTypes=['image/jpeg','image/png','image/webp'];
-  const ext=(file.name||'').split('.').pop()?.toLowerCase();
-  if(['heic','heif'].includes(ext)||file.type==='image/heic'||file.type==='image/heif'){
-   return reject(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
-  }
-  if(file.type&&!validTypes.includes(file.type)){
-   return reject(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
-  }
 
-  let settled=false;
-  const timeoutId=setTimeout(()=>{
-   if(settled)return;
-   settled=true;
-   reject(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
-  },10000);
-
-  function finish(err,result){
-   if(settled)return;
-   settled=true;
-   clearTimeout(timeoutId);
-   if(err)reject(err);
-   else resolve(result);
-  }
-
-  // 1. Try createImageBitmap first
-  if(typeof createImageBitmap==='function'){
-   try{
-    const bmp=await createImageBitmap(file);
-    const maxDim=1200;
-    let width=bmp.width,height=bmp.height;
-    if(width>maxDim||height>maxDim){
-     if(width>=height){
-      height=Math.round((height*maxDim)/width);
-      width=maxDim;
-     }else{
-      width=Math.round((width*maxDim)/height);
-      height=maxDim;
-     }
-    }
-    const canvas=document.createElement('canvas');
-    canvas.width=width;canvas.height=height;
-    const ctx=canvas.getContext('2d');
-    ctx.drawImage(bmp,0,0,width,height);
-    try{bmp.close()}catch(e){}
-    const dataUrl=canvas.toDataURL('image/jpeg',0.7);
-    if(dataUrl.length>950000){
-     return finish(new Error('Compressed screenshot exceeds 0.7 MB limit. Please select a smaller image.'));
-    }
-    return finish(null,dataUrl);
-   }catch(bmpErr){
-    // Fall back to Image() / ObjectURL if createImageBitmap fails
-   }
-  }
-
-  // 2. Fallback to Image() with ObjectURL
-  let objectUrl='';
-  try{
-   objectUrl=URL.createObjectURL(file);
-  }catch(e){
-   return finish(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
-  }
-
-  const img=new Image();
-  const cleanup=()=>{
-   if(objectUrl){
-    try{URL.revokeObjectURL(objectUrl)}catch(e){}
-    objectUrl='';
-   }
-  };
-
-  img.onerror=()=>{
-   cleanup();
-   finish(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
-  };
-
-  img.onload=()=>{
-   try{
-    const maxDim=1200;
-    let width=img.width,height=img.height;
-    if(width>maxDim||height>maxDim){
-     if(width>=height){
-      height=Math.round((height*maxDim)/width);
-      width=maxDim;
-     }else{
-      width=Math.round((width*maxDim)/height);
-      height=maxDim;
-     }
-    }
-    const canvas=document.createElement('canvas');
-    canvas.width=width;canvas.height=height;
-    const ctx=canvas.getContext('2d');
-    ctx.drawImage(img,0,0,width,height);
-    cleanup();
-    const dataUrl=canvas.toDataURL('image/jpeg',0.7);
-    if(dataUrl.length>950000){
-     return finish(new Error('Compressed screenshot exceeds 0.7 MB limit. Please select a smaller image.'));
-    }
-    finish(null,dataUrl);
-   }catch(err){
-    cleanup();
-    finish(new Error('Failed to compress screenshot: '+err.message));
-   }
-  };
-
-  img.src=objectUrl;
- });
-}
 async function submitRegistration(ev){
  ev.preventDefault();
  if(reg.submitting)return false;
- const form=ev.target,formData=new FormData(form),file=form.querySelector('input[name="shot"]')?.files?.[0];
- reg.d.method=String(formData.get('method')||'UPI');reg.d.utr=String(formData.get('utr')||'').trim();
- if(formData.get('pendingAcknowledged')!=='yes'){reg.error='Please acknowledge that payment will remain pending until verified.';view();return false}
- if(file){
-  const validTypes=['image/jpeg','image/png','image/webp'];
-  const ext=(file.name||'').split('.').pop()?.toLowerCase();
-  if(['heic','heif'].includes(ext)||file.type==='image/heic'||file.type==='image/heif'){
-   reg.error='This image could not be read. Please upload a JPG or PNG screenshot.';view();return false;
-  }
-  if(file.type&&!validTypes.includes(file.type)){
-   reg.error='This image could not be read. Please upload a JPG or PNG screenshot.';view();return false;
-  }
+ const form=ev.target,f=Object.fromEntries(new FormData(form));
+ const size=registrationSize();
+ const participants=Array.from({length:size},(_,i)=>({
+  name:String(f[`p${i}_name`]||'').trim(),
+  email:lowerEmail(f[`p${i}_email`]),
+  mobile:String(f[`p${i}_mobile`]||'').trim(),
+  college:String(f[`p${i}_college`]||'').trim(),
+  department:String(f[`p${i}_department`]||'').trim(),
+  year:String(f[`p${i}_year`]||'1')
+ }));
+
+ const emails=participants.map(person=>person.email);
+ if(emails.some((email,index)=>emails.indexOf(email)!==index)){
+  reg.error='Each participant must use a different email address.';view();return false;
  }
+ if(emails.some(email=>teamEmailExists(email))){
+  reg.error='A participant email is already registered. Use a different email address.';view();return false;
+ }
+
+ reg.participants=participants;
  reg.submitting=true;reg.error='';
  const submitButton=form.querySelector('button[type="submit"]');
  if(submitButton){submitButton.disabled=true;submitButton.textContent='Submitting…'}
+
  try{
-  let shot='';
-  if(file){
-   shot=await compressScreenshot(file);
-  }
-  const totalAmount=registrationTotal();
   const response=await fetch('/api/teams/register',{
    method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({team:reg.d.team,teamSize:registrationSize(),feePerPerson:REGISTRATION_FEE_PER_PERSON,totalAmount,participants:reg.participants,method:formData.get('method'),utr:formData.get('utr'),shot})
+   body:JSON.stringify({team:reg.d.team,teamSize:size,participants})
   });
   let result=null;
   const rawText=await response.text();
@@ -939,15 +721,14 @@ async function submitRegistration(ev){
   const data=result.data,leader=reg.participants[0],members=reg.participants.slice(1);
   const team={
    id:data.id,name:reg.d.team,leader:leader.name,mobile:leader.mobile,email:leader.email,college:leader.college,department:leader.department,year:leader.year,
-   teamSize:data.teamSize,totalAmount:data.totalAmount,feePerPerson:data.feePerPerson,createdAt:data.createdAt,
+   teamSize:data.teamSize,createdAt:data.createdAt,
    members,track:'',problem:'',title:'',desc:'',
-   pay:{method:formData.get('method'),utr:String(formData.get('utr')||'').trim(),hasShot:Boolean(shot),status:data.payStatus||'Pending'},
-   status:data.status||'Pending',acc:{userId:data.userId,enabled:false}
+   status:data.status||'Approved',acc:{userId:data.userId,enabled:true}
   };
-  db.teams.push(team);save();reg.done=team;reg.step=4;reg.submitting=false;view();
+  db.teams.push(team);save();reg.done=team;reg.step=3;reg.submitting=false;view();
  }catch(error){
   reg.submitting=false;
-  reg.error=error.message||'This image could not be read. Please upload a JPG or PNG screenshot.';
+  reg.error=error.message||'Registration failed. Please check your connection and try again.';
   view();
  }finally{
   reg.submitting=false;
@@ -1082,7 +863,7 @@ async function downloadAdminProblemFile(fileId, fileName, viewInNewTab = false) 
 function teamPg(){const t=myTeam();if(!t){logout();return ''}const e=db.event;
  const assignedStatement=t.problemStatementId?db.problemStatementFiles.find(item=>item.id===t.problemStatementId):db.problemStatementFiles.find(item=>item.track===t.track&&item.title===t.problem);
  const assignedTrack=assignedStatement?.track||t.track,assignedProblem=assignedStatement?.title||t.problem,statementFile=assignedStatement?.active?assignedStatement:null;
- return `<section><h2>Welcome, ${esc(t.name)}</h2><div class="grid"><div class="glass">Registration<br>${badge(t.status)}</div><div class="glass">Payment<br>${badge(t.pay.status)}</div><div class="glass">Account<br>${badge(t.acc.enabled?'Enabled':'Disabled')}</div></div>
+ return `<section><h2>Welcome, ${esc(t.name)}</h2><div class="grid"><div class="glass">Registration<br>${badge(t.status||'Approved')}</div><div class="glass">Account<br>${badge(t.acc?.enabled?'Enabled':'Disabled')}</div></div>
  <div class="glass" style="margin-top:16px"><h3>Team ${t.id}</h3><p>Leader: ${esc(t.leader)} · ${esc(t.mobile)} · ${esc(t.email)}<br>${esc(t.college)} · Year ${esc(t.year)}<br>Project: <b>${esc(t.title)}</b> – ${esc(t.desc)}</p>
  <h3>Members</h3>${renderTeamMembers(t.members)}</div>
  <div class="glass" style="margin-top:16px"><h3>TRACK & PROBLEM STATEMENT</h3><p>Assigned Track Name: <b>${esc(assignedTrack||'Not selected yet')}</b><br>Problem Statement Title: <b>${esc(assignedProblem||'Not selected yet')}</b></p>
@@ -1215,23 +996,22 @@ function adminPg(){
   }else if(adminSessionStatus==='verified'&&!adminTeamsSyncAttempted){
     adminTeamsSyncAttempted=true;syncAdminTeamsFromBackend();
   }
-  const T=db.teams,tabs=['overview','event','payment-qr','teams','accounts','announcements','problem-files'],tabLabels={'payment-qr':'Payment QR','problem-files':'Track & Problem Statement Files'};
+  const T=db.teams,tabs=['overview','event','teams','accounts','announcements','problem-files'],tabLabels={'problem-files':'Track & Problem Statement Files'};
  let h=`<section><h2>Admin Dashboard</h2>${adminSessionStatus==='unavailable'?'<p class="err">Could not verify the admin session. Your local dashboard data is preserved. <button class="btn sm" type="button" onclick="retryAdminSession()">Retry verification</button></p>':''}<div class="tabs">${tabs.map(t=>`<button class="btn ${adm.tab==t?'on':''}" onclick="adm.tab='${t}';view()">${tabLabels[t]||t[0].toUpperCase()+t.slice(1)}</button>`).join('')}<button class="btn ghost" type="button" onclick="refreshAdminTeams()" ${adminTeamsSyncPromise?'disabled':''}>Refresh teams</button></div>`;
- if(adm.tab=='overview')h+=`<div class="grid">${[['Total Teams',T.length],['Participants',T.reduce((n,t)=>n+1+t.members.length,0)],['Payment Completed',T.filter(t=>t.pay.status=='Paid').length],['Pending Payments',T.filter(t=>t.pay.status!='Paid').length],['Active Accounts',T.filter(t=>t.acc.enabled).length]].map(([l,n])=>`<div class="glass stat"><b>${n}</b>${l}</div>`).join('')}</div>`;
- if(adm.tab=='event'){const e=db.event;h+=`<form class="glass" onsubmit="return saveEv(event)"><div class="two">${['title','date','time','venue','contact'].map(k=>`<label>${k[0].toUpperCase()+k.slice(1)}<input name="${k}" type="${k=='date'?'date':'text'}" value="${esc(e[k])}"></label>`).join('')}</div><p class="payment-pending-note">Registration is fixed at ₹500 per participant. The final team total is calculated from the selected team size.</p><label>Description<textarea name="about">${esc(e.about)}</textarea></label>
+ if(adm.tab=='overview')h+=`<div class="grid">${[['Total Teams',T.length],['Participants',T.reduce((n,t)=>n+1+t.members.length,0)],['Approved Teams',T.filter(t=>t.status=='Approved').length],['Active Accounts',T.filter(t=>t.acc?.enabled).length]].map(([l,n])=>`<div class="glass stat"><b>${n}</b>${l}</div>`).join('')}</div>`;
+ if(adm.tab=='event'){const e=db.event;h+=`<form class="glass" onsubmit="return saveEv(event)"><div class="two">${['title','date','time','venue','contact'].map(k=>`<label>${k[0].toUpperCase()+k.slice(1)}<input name="${k}" type="${k=='date'?'date':'text'}" value="${esc(e[k])}"></label>`).join('')}</div><label>Description<textarea name="about">${esc(e.about)}</textarea></label>
   ${Object.entries(ALIST).map(([k,[a,b,l]])=>`<label>${l} – one per line<textarea name="${k}">${esc(lines(db[k],x=>x.t+' | '+x.d))}</textarea></label>`).join('')}
   <label>Tracks (Track | Problem 1 ; Problem 2 ...)<textarea name="tracks">${esc(lines(db.tracks,t=>t.name+' | '+t.problems.join(' ; ')))}</textarea></label><button class="btn">Save event data</button></form>`}
  if(adm.tab=='teams'){
   const q=adm.q.toLowerCase(),L=T.filter(t=>{
-   const size=Number(t.teamSize)||1+(t.members?.length||0),payment=t.pay?.status||'Pending';
-   return JSON.stringify([t.id,t.name,t.leader,t.mobile,t.email,t.members,t.track,t.problem]).toLowerCase().includes(q)&&(!adm.teamSize||String(size)===adm.teamSize)&&(!adm.payStatus||payment===adm.payStatus);
+   const size=Number(t.teamSize)||1+(t.members?.length||0);
+   return JSON.stringify([t.id,t.name,t.leader,t.mobile,t.email,t.members,t.track,t.problem]).toLowerCase().includes(q)&&(!adm.teamSize||String(size)===adm.teamSize);
   });
-  h+=`<input placeholder="Search teams and participants…" value="${esc(adm.q)}" oninput="adm.q=this.value;view()" style="margin-bottom:10px"><div class="admin-team-filters"><label>Team size<select onchange="adm.teamSize=this.value;view()"><option value="">All team sizes</option>${[2,3,4].map(size=>`<option value="${size}" ${adm.teamSize===String(size)?'selected':''}>${size} members</option>`).join('')}</select></label><label>Payment status<select onchange="adm.payStatus=this.value;view()"><option value="">All payment statuses</option>${['Pending','Paid','Rejected'].map(status=>`<option value="${status}" ${adm.payStatus===status?'selected':''}>${status}</option>`).join('')}</select></label></div>
-  <div class="glass"><table><thead><tr><th>ID<th>Team<th>Leader<th>Team size<th>Participants<th>Total fee<th>Registered<th>Transaction reference<th>Payment<th>Status<th>Account<th></tr></thead><tbody>${L.map(t=>`<tr><td data-l="ID">${esc(t.id)}<td data-l="Team">${esc(t.name)}<td data-l="Leader">${esc(t.leader)}<td data-l="Team size">${Number(t.teamSize)||1+(t.members?.length||0)}<td data-l="Participants" class="admin-participants">${renderParticipantDetails(t)}<td data-l="Total fee">${formatRupees(t.totalAmount||((Number(t.teamSize)||1+(t.members?.length||0))*500))}<td data-l="Registered">${t.createdAt?esc(new Date(t.createdAt).toLocaleString('en-IN')):'—'}<td data-l="Transaction reference">${esc(t.pay?.utr||'—')}<td data-l="Payment">${badge(t.pay?.status||'Pending')}<td data-l="Status">${badge(t.status||'Pending')}<td data-l="Account">${badge(t.acc?.enabled?'Enabled':'Disabled')}<td data-l="Actions"><button class="btn sm" onclick="editTeam('${esc(t.id)}')">Edit</button> <button class="btn sm red" onclick="delTeam('${esc(t.id)}')">Del</button></tr>`).join('')||'<tr><td colspan="12">No teams found.</td></tr>'}</tbody></table></div>`;
+  h+=`<input placeholder="Search teams and participants…" value="${esc(adm.q)}" oninput="adm.q=this.value;view()" style="margin-bottom:10px"><div class="admin-team-filters"><label>Team size<select onchange="adm.teamSize=this.value;view()"><option value="">All team sizes</option>${[2,3,4].map(size=>`<option value="${size}" ${adm.teamSize===String(size)?'selected':''}>${size} members</option>`).join('')}</select></label></div>
+  <div class="glass"><table><thead><tr><th>ID<th>Team<th>Leader<th>Team size<th>Participants<th>Registered<th>Status<th>Account<th>Actions</tr></thead><tbody>${L.map(t=>`<tr><td data-l="ID">${esc(t.id)}<td data-l="Team">${esc(t.name)}<td data-l="Leader">${esc(t.leader)}<td data-l="Team size">${Number(t.teamSize)||1+(t.members?.length||0)}<td data-l="Participants" class="admin-participants">${renderParticipantDetails(t)}<td data-l="Registered">${t.createdAt?esc(new Date(t.createdAt).toLocaleString('en-IN')):'—'}<td data-l="Status">${badge(t.status||'Approved')}<td data-l="Account">${badge(t.acc?.enabled?'Enabled':'Disabled')}<td data-l="Actions"><button class="btn sm" onclick="editTeam('${esc(t.id)}')">Edit</button> <button class="btn sm red" onclick="delTeam('${esc(t.id)}')">Del</button></tr>`).join('')||'<tr><td colspan="9">No teams found.</td></tr>'}</tbody></table></div>`;
  }
  if(adm.tab=='accounts')h+=`<div class="glass"><table><thead><tr><th>Team ID<th>Leader<th>User ID<th>Password<th>Status<th></tr></thead><tbody>${T.map(t=>`<tr><td data-l="Team ID">${t.id}<td data-l="Leader">${esc(t.leader)}<td data-l="User ID">${esc(t.acc?.userId||t.leader)}<td data-l="Password"><span style="color:var(--mu);font-size:12px">Protected (bcrypt)</span><td data-l="Status">${badge(t.acc?.enabled?'Enabled':'Disabled')}<td><button class="btn sm" onclick="editAcc('${t.id}')">Edit</button> <button class="btn sm ghost" onclick="toggleAcc('${t.id}')">${t.acc?.enabled?'Disable':'Enable'}</button></tr>`).join('')||'<tr><td>No accounts yet.</tr>'}</tbody></table></div><button class="btn" style="margin-top:14px" onclick="newTeam()">+ Create team & account</button>`;
  if(adm.tab=='announcements')h+=`<form class="glass" onsubmit="return addAnn(event)">${F('Title','t')}<label>Message<textarea name="d" required></textarea></label><button class="btn">Post announcement</button></form>${db.announcements.map((a,i)=>`<div class="glass" style="margin-top:10px"><b>${esc(a.t)}</b><p>${esc(a.d)}</p><button class="btn sm red" onclick="delAnn(${i})">Delete</button></div>`).join('')}`;
- if(adm.tab=='payment-qr')h+=paymentQrAdmin();
  if(adm.tab=='problem-files')h+=problemStatementFilesAdmin();
  return h+'</section>'}
 async function verifyAdminSession(){
@@ -1323,41 +1103,14 @@ async function delAnn(index){
     toast('Deleted locally, but server update failed: '+err.message);
   }
 }
-async function viewPaymentScreenshot(id){
- const container=$('#screenshot-preview-container');
- if(container){
-  container.innerHTML='<p style="color:var(--mu)">Loading screenshot…</p>';
- }
- try{
-  const res=await fetch(`/api/admin/teams/${encodeURIComponent(id)}/screenshot`,{credentials:'include'});
-  const data=await res.json();
-  if(!res.ok||!data.success||!data.shot){
-   throw new Error(data.message||'Failed to load payment screenshot.');
-  }
-  const t=db.teams.find(x=>x.id==id);
-  if(t)t.pay.shot=data.shot;
-  if(container){
-   container.innerHTML=`<div style="margin-top:10px"><a href="${data.shot}" target="_blank" rel="noopener noreferrer" style="color:var(--c1);display:inline-block;margin-bottom:8px">Open full screenshot in new tab</a><br><img src="${data.shot}" alt="Payment screenshot for ${esc(id)}" style="max-width:100%;max-height:360px;border-radius:8px;border:1px solid rgba(255,255,255,0.15)"></div>`;
-  }else{
-   window.open(data.shot,'_blank');
-  }
- }catch(err){
-  if(container){
-   container.innerHTML=`<p class="err" style="margin-top:8px">${esc(err.message)}</p>`;
-  }else{
-   alert(err.message);
-  }
- }
-}
 function editTeam(id){
  const t=db.teams.find(x=>x.id==id);
  if(!t){alert('Team not found: '+id);return;}
- const hasProof=Boolean(t.pay?.hasShot||t.pay?.shot);
  openModal(`<h3>Edit ${t.id}</h3><form onsubmit="return saveTeam(event,'${id}')"><div class="two">${[['Team Name','name'],['Leader','leader'],['Mobile','mobile'],['Email','email'],['College','college'],['Department','department'],['Year','year'],['Project Title','title']].map(([l,k])=>F(l,k,t[k]||'')).join('')}
  <label>Track<select id="editTrack" name="track" onchange="refreshAdminProblems(this.value)">${trackOptions(t.track,true)}</select></label><label>Problem Statement<select id="editProblem" name="problem">${problemOptions(t.track,t.problem,true)}</select></label>
- <label>Payment Status<select name="ps">${['Pending','Paid','Rejected'].map(x=>`<option ${(t.pay?.status||'Pending')==x?'selected':''}>${x}</option>`).join('')}</select></label><label>Registration Status<select name="st">${['Pending','Approved','Rejected'].map(x=>`<option ${(t.status||'Pending')==x?'selected':''}>${x}</option>`).join('')}</select></label>${F('UTR','utr',t.pay?.utr||'')}</div>
+ <label>Registration Status<select name="st">${['Pending','Approved','Rejected'].map(x=>`<option ${(t.status||'Approved')==x?'selected':''}>${x}</option>`).join('')}</select></label></div>
  <label>Description<textarea name="desc">${esc(t.desc||'')}</textarea></label><label>Additional members (one per line: Name | Email | Mobile | College | Department | Year)<textarea name="mem">${esc(lines(t.members||[],m=>{if(!m)return'';if(typeof m==='string')return m;return[m.name||'',m.email||'',m.mobile||'',m.college||'',m.department||'',m.year||''].join(' | ')}))}</textarea></label>
- ${hasProof?`<div style="margin-bottom:14px"><button type="button" class="btn sm ghost" onclick="viewPaymentScreenshot('${esc(t.id)}')">View payment screenshot</button><div id="screenshot-preview-container"></div></div>`:''}<button class="btn">Save</button> <button type="button" class="btn ghost" onclick="closeModal()">Cancel</button></form>`);
+ <button class="btn">Save</button> <button type="button" class="btn ghost" onclick="closeModal()">Cancel</button></form>`);
 }
 async function syncAdminTeamsFromBackend(){
   if(ses?.role!=='admin'||adminSessionStatus!=='verified')return;
@@ -1384,7 +1137,7 @@ async function syncAdminTeamsFromBackend(){
   finally{adminTeamsSyncPromise=null}
 }
 function hasUnsavedAdminChanges(){
- return Boolean($('#app form')||(!$('#modal')?.classList.contains('hide'))||pendingQrDataUrl);
+ return Boolean($('#app form')||(!$('#modal')?.classList.contains('hide')));
 }
 
 async function saveTeam(ev,id){
@@ -1403,14 +1156,14 @@ async function saveTeam(ev,id){
       credentials:'include',
       body:JSON.stringify({
         name:f.name,leader:f.leader,mobile:f.mobile,email,college:f.college,department:f.department,year:f.year,
-        track:f.track,problem:f.problem,title:f.title,desc:f.desc,ps:f.ps,st:f.st,utr:f.utr,members
+        track:f.track,problem:f.problem,title:f.title,desc:f.desc,st:f.st,members
       })
     });
   }catch(err){console.warn('Backend admin team update offline, saved locally:',err.message);}
 
   ['name','leader','mobile','college','department','year','track','problem','title','desc'].forEach(k=>t[k]=f[k]);
   t.email=email;
-  t.problemStatementId=db.problemStatementFiles.find(item=>item.track===f.track&&item.title===f.problem)?.id||'';t.pay.status=f.ps;t.pay.utr=f.utr;t.status=f.st;
+  t.problemStatementId=db.problemStatementFiles.find(item=>item.track===f.track&&item.title===f.problem)?.id||'';t.status=f.st;
   t.members=members;
   save();closeModal();view();return false;
 }
@@ -1463,10 +1216,13 @@ async function mkTeam(ev){
     await fetch('/api/teams/register',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({team:f.name,leader:f.leader,mobile:f.mobile,email:`${f.leader.replace(/\s+/g,'').toLowerCase()}@sample.com`,utr:'ADMIN_CREATED'})
+      body:JSON.stringify({team:f.name,teamSize:2,participants:[
+        {name:f.leader,email:`${f.leader.replace(/\s+/g,'').toLowerCase()}@sample.com`,mobile:f.mobile,college:'College',department:'Dept',year:'1'},
+        {name:'Member 2',email:`member2_${Date.now()}@sample.com`,mobile:'9000000000',college:'College',department:'Dept',year:'1'}
+      ]})
     });
   }catch(err){}
-  db.teams.push({id:newTeamId,name:f.name,leader:f.leader,mobile:f.mobile,email:'',college:'',year:'',members:[],track:'',problem:'',title:'',desc:'',pay:{method:'',utr:'',shot:'',status:'Pending'},status:'Pending',acc:{userId:f.leader,enabled:false}});
+  db.teams.push({id:newTeamId,name:f.name,leader:f.leader,mobile:f.mobile,email:'',college:'',year:'',members:[],track:'',problem:'',title:'',desc:'',status:'Approved',acc:{userId:f.leader,enabled:true}});
   save();closeModal();view();return false;
 }
 /* ---------- router ---------- */
@@ -1497,483 +1253,5 @@ function eventSyncBanner(){
 }
 function view(){chrome();const r=(location.hash.slice(2)||'home');
  $('#app').innerHTML=eventSyncBanner()+({home,register,login:loginPg,team:teamPg,admin:adminPg}[r]||home)();tick();initScrollReveal()}
-addEventListener('hashchange',()=>{scrollTo(0,0);view();playHomeIntro()});initAmbientEffects();playHomeIntro();view();syncEventDataOnLoad();syncPaymentSettingsOnLoad();
+addEventListener('hashchange',()=>{scrollTo(0,0);view();playHomeIntro()});initAmbientEffects();playHomeIntro();view();syncEventDataOnLoad();
 
-/* ---------- PAYMENT QR & AMOUNT ADMIN MANAGEMENT ---------- */
-let pendingQrFile = null;
-let pendingQrDataUrl = '';
-
-function promptAdminPasswordConfirm({ title, description, onConfirm }) {
-  if (ses?.role !== 'admin') {
-    toast('Admin access is required.');
-    return;
-  }
-  const modalHtml = `
-    <div class="pw-modal-box">
-      <h3>${esc(title)}</h3>
-      <p class="pw-modal-desc">${esc(description)}</p>
-      <form id="admin-confirm-form" onsubmit="return handleAdminConfirmSubmit(event)">
-        <label>Admin Password
-          <div class="pw-field-wrap">
-            <input id="admin-confirm-pw" type="password" placeholder="Enter admin password" required autofocus autocomplete="current-password">
-            <button type="button" class="pw-toggle-btn" onclick="toggleConfirmPwVisibility()" aria-label="Toggle password visibility">👁️</button>
-          </div>
-        </label>
-        <div id="admin-confirm-err" class="err" style="margin-bottom:12px"></div>
-        <div class="pw-modal-actions">
-          <button type="button" class="btn ghost" onclick="cancelAdminConfirm()">Cancel</button>
-          <button id="admin-confirm-btn" class="btn">Confirm</button>
-        </div>
-      </form>
-    </div>
-  `;
-  openModal(modalHtml);
-  window._pendingAdminConfirm = onConfirm;
-}
-
-function cancelAdminConfirm() {
-  const input = $('#admin-confirm-pw');
-  if (input) input.value = '';
-  window._pendingAdminConfirm = null;
-  closeModal();
-}
-
-function toggleConfirmPwVisibility() {
-  const input = $('#admin-confirm-pw');
-  if (!input) return;
-  input.type = input.type === 'password' ? 'text' : 'password';
-}
-
-async function handleAdminConfirmSubmit(ev) {
-  ev.preventDefault();
-  const input = $('#admin-confirm-pw'), errEl = $('#admin-confirm-err'), btn = $('#admin-confirm-btn');
-  if (!input || !errEl) return false;
-  const enteredPw = input.value;
-  if (!enteredPw) {
-    errEl.textContent = 'Please enter the admin password.';
-    return false;
-  }
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = 'Verifying…';
-  }
-
-  // Server-side verification
-  let verified = false;
-  try {
-    const res = await fetch('/api/admin/verify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ password: enteredPw })
-    });
-    const data = await res.json();
-    if (res.ok && data.success) {
-      verified = true;
-    } else {
-      errEl.textContent = data.message || 'Incorrect admin password. Please try again.';
-    }
-  } catch (netErr) {
-    errEl.textContent = 'Server connection error verifying admin password.';
-  }
-
-  if (!verified) {
-    input.value = '';
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = 'Confirm';
-    }
-    input.focus();
-    return false;
-  }
-
-  const cb = window._pendingAdminConfirm;
-  window._pendingAdminConfirm = null;
-  const pwToPass = enteredPw;
-  input.value = '';
-  closeModal();
-  if (typeof cb === 'function') {
-    cb(pwToPass);
-  }
-  return false;
-}
-
-function compressQrImage(file) {
-  return new Promise(async (resolve, reject) => {
-    const ext = (file.name || '').split('.').pop()?.toLowerCase();
-    if (['heic', 'heif'].includes(ext) || file.type === 'image/heic' || file.type === 'image/heif') {
-      return reject(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
-    }
-
-    let settled = false;
-    const timeoutId = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      reject(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
-    }, 10000);
-
-    function finish(err, result) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeoutId);
-      if (err) reject(err);
-      else resolve(result);
-    }
-
-    // 1. Try createImageBitmap
-    if (typeof createImageBitmap === 'function') {
-      try {
-        const bmp = await createImageBitmap(file);
-        const maxDim = 800;
-        let width = bmp.width, height = bmp.height;
-        if (width > maxDim || height > maxDim) {
-          if (width >= height) {
-            height = Math.round((height * maxDim) / width);
-            width = maxDim;
-          } else {
-            width = Math.round((width * maxDim) / height);
-            height = maxDim;
-          }
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width = width; canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(bmp, 0, 0, width, height);
-        try { bmp.close(); } catch (e) {}
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-        if (dataUrl.length > 680000) {
-          return finish(new Error('Compressed QR image exceeds 500 KB. Please choose a simpler or smaller image.'));
-        }
-        return finish(null, dataUrl);
-      } catch (bmpErr) {}
-    }
-
-    // 2. Fallback to Image() with object URL
-    let objectUrl = '';
-    try {
-      objectUrl = URL.createObjectURL(file);
-    } catch (e) {
-      return finish(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
-    }
-
-    const img = new Image();
-    const cleanup = () => {
-      if (objectUrl) {
-        try { URL.revokeObjectURL(objectUrl); } catch (e) {}
-        objectUrl = '';
-      }
-    };
-
-    img.onerror = () => {
-      cleanup();
-      finish(new Error('This image could not be read. Please upload a JPG or PNG screenshot.'));
-    };
-
-    img.onload = () => {
-      try {
-        const maxDim = 800;
-        let width = img.width, height = img.height;
-        if (width > maxDim || height > maxDim) {
-          if (width >= height) {
-            height = Math.round((height * maxDim) / width);
-            width = maxDim;
-          } else {
-            width = Math.round((width * maxDim) / height);
-            height = maxDim;
-          }
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width = width; canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, width, height);
-        cleanup();
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-        if (dataUrl.length > 680000) {
-          return finish(new Error('Compressed QR image exceeds 500 KB. Please choose a simpler or smaller image.'));
-        }
-        finish(null, dataUrl);
-      } catch (err) {
-        cleanup();
-        finish(new Error('Failed to compress QR image: ' + err.message));
-      }
-    };
-
-    img.src = objectUrl;
-  });
-}
-
-function handleQrFileSelect(ev) {
-  const file = ev.target.files?.[0];
-  if (!file) return;
-  const allowed = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
-  const ext = file.name.split('.').pop()?.toLowerCase();
-  if (!allowed.includes(file.type) && !['png', 'jpg', 'jpeg', 'webp'].includes(ext)) {
-    toast('Only PNG, JPG, JPEG, and WEBP images are allowed.');
-    ev.target.value = '';
-    return;
-  }
-  if (file.size > 2.5 * 1024 * 1024) {
-    toast('File size exceeds 2.5MB. Please choose a smaller image.');
-    ev.target.value = '';
-    return;
-  }
-  compressQrImage(file).then(dataUrl => {
-    pendingQrFile = file;
-    pendingQrDataUrl = dataUrl;
-    view();
-    toast('QR image compressed and ready. Review preview and click "Save New QR".');
-  }).catch(err => {
-    toast(err.message || 'Could not process QR image.');
-    pendingQrFile = null;
-    pendingQrDataUrl = '';
-    ev.target.value = '';
-  });
-}
-
-function cancelPendingQr() {
-  pendingQrFile = null;
-  pendingQrDataUrl = '';
-  view();
-}
-
-function requestSavePaymentQr() {
-  if (!pendingQrDataUrl) {
-    toast('Please select a new QR image first.');
-    return;
-  }
-  promptAdminPasswordConfirm({
-    title: 'Confirm Payment QR Change',
-    description: 'Enter your admin password to replace the current active payment QR with the newly selected image.',
-    onConfirm: async (adminPw) => {
-      const newQr = pendingQrDataUrl;
-      try {
-        const res = await fetch('/api/payment-settings', {
-          method: 'POST',
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-password': adminPw
-          },
-          body: JSON.stringify({
-            upiId: getPaymentUpiId(),
-            payeeName: getPaymentPayeeName(),
-            fee: REGISTRATION_FEE_PER_PERSON,
-            qrImage: newQr
-          })
-        });
-        const data = await res.json();
-        if (!res.ok || !data.success) {
-          toast('Error saving QR: ' + (data.message || 'Unauthorized'));
-          return;
-        }
-      } catch (e) {
-        toast('Backend offline: ' + e.message);
-        return;
-      }
-
-      db.event.qrImage = newQr;
-      save();
-      pendingQrFile = null;
-      pendingQrDataUrl = '';
-      view();
-      toast('Payment QR code updated successfully! ✓');
-    }
-  });
-}
-
-function requestResetPaymentQr() {
-  if (!db.event?.qrImage) {
-    toast('Payment QR is already using the default image.');
-    return;
-  }
-  promptAdminPasswordConfirm({
-    title: 'Confirm QR Reset',
-    description: 'Enter your admin password to reset the payment QR code back to the default original image.',
-    onConfirm: async (adminPw) => {
-      try {
-        const res = await fetch('/api/payment-settings', {
-          method: 'POST',
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-password': adminPw
-          },
-          body: JSON.stringify({
-            upiId: getPaymentUpiId(),
-            payeeName: getPaymentPayeeName(),
-            fee: REGISTRATION_FEE_PER_PERSON,
-            qrImage: ''
-          })
-        });
-        const data = await res.json();
-        if (!res.ok || !data.success) {
-          toast('Error resetting QR: ' + (data.message || 'Unauthorized'));
-          return;
-        }
-      } catch (e) {
-        toast('Backend offline: ' + e.message);
-        return;
-      }
-
-      delete db.event.qrImage;
-      save();
-      pendingQrFile = null;
-      pendingQrDataUrl = '';
-      view();
-      toast('Payment QR reset to default image. ✓');
-    }
-  });
-}
-
-function requestSavePaymentSettings(ev) {
-  ev.preventDefault();
-  const form = ev.target;
-  const rawUpi = (form.upiId?.value || '').trim();
-  const rawPayee = (form.payeeName?.value || '').trim();
-
-  // Validate UPI ID
-  const upiRegex = /^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}$/;
-  if (!rawUpi || !upiRegex.test(rawUpi)) {
-    toast('Enter a valid UPI ID format (e.g. name@bank or username@okhdfcbank).');
-    return false;
-  }
-
-  // Validate Payee Name
-  if (!rawPayee || rawPayee.length < 2 || rawPayee.length > 80) {
-    toast('Enter a valid Payee Name (2 to 80 characters).');
-    return false;
-  }
-
-  const formattedFee = String(REGISTRATION_FEE_PER_PERSON);
-
-  promptAdminPasswordConfirm({
-    title: 'Confirm Payment Settings Update',
-    description: `Enter your admin password to save payment settings: UPI ID (${rawUpi}), Payee (${rawPayee}). Registration remains ₹${formattedFee} per participant.`,
-    onConfirm: async (adminPw) => {
-      // 1. Attempt backend synchronization with authorization
-      let backendSuccess = false;
-      let backendMsg = '';
-      try {
-        const res = await fetch('/api/payment-settings', {
-          method: 'POST',
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-admin-password': adminPw
-          },
-          body: JSON.stringify({
-            upiId: rawUpi,
-            payeeName: rawPayee,
-            fee: formattedFee,
-            qrImage: db.event?.qrImage || ''
-          })
-        });
-        const resData = await res.json();
-        if (res.ok && resData.success) {
-          backendSuccess = true;
-          backendMsg = resData.message || 'Saved to MongoDB backend';
-        } else {
-          backendMsg = resData.message || 'Backend rejected update';
-        }
-      } catch (netErr) {
-        backendMsg = 'Backend server offline: ' + netErr.message;
-      }
-
-      if (backendSuccess) {
-        // Update local state only on authorized backend success
-        db.event.upiId = rawUpi;
-        db.event.payeeName = rawPayee;
-        db.event.fee = formattedFee;
-        save();
-        view();
-        toast('Payment settings saved to MongoDB & synced! ✓');
-      } else {
-        toast('Error: ' + backendMsg);
-      }
-    }
-  });
-  return false;
-}
-
-function paymentQrAdmin() {
-  const currentQr = getPaymentQrImage();
-  return `
-    <div class="qr-admin-section">
-      <h3 style="margin-bottom:14px">PAYMENT QR & REGISTRATION FEE</h3>
-      <div class="glass" style="margin-bottom:16px">
-        <p style="color:var(--mu)">Manage the active UPI payment QR code and recipient details. Registration is fixed at ₹500 per participant; the total is calculated from the team size and validated by the server.</p>
-      </div>
-
-      <div class="qr-admin-grid">
-        <!-- Card 1: Active & Replacement QR -->
-        <div class="glass qr-admin-card">
-          <h4>Active Payment QR</h4>
-          <p style="font-size:12px;color:var(--mu);margin-top:4px">Currently displayed to participants</p>
-          <div class="qr-admin-preview-box">
-            <img src="${esc(currentQr)}" alt="Current Payment QR">
-          </div>
-          <div style="margin-bottom:12px;padding:6px 14px;background:rgba(255,215,0,.08);border:1px solid var(--bd);border-radius:20px;display:inline-flex;align-items:center;gap:6px">
-            <span style="font-size:12px;color:var(--mu)">Registration fee:</span>
-            <b style="color:var(--c1);font-size:14px">₹500 per participant</b>
-          </div>
-          <p style="font-size:11px;color:var(--mu);max-width:280px;line-height:1.4;margin-bottom:12px"><b>Note:</b> QR images are static. Registration displays the correct team total and offers an amount-prefilled UPI intent when the configured recipient is available.</p>
-          ${db.event?.qrImage ? `<button type="button" class="btn sm ghost" style="margin-bottom:12px" onclick="requestResetPaymentQr()">Reset to Default QR</button>` : ''}
-
-          <div style="width:100%;border-top:1px solid var(--bd);padding-top:16px;margin-top:8px">
-            <h4>Select Replacement QR</h4>
-            <p style="font-size:12px;color:var(--mu);margin-bottom:10px">Accepts PNG, JPG, JPEG, or WEBP up to 2.5MB (automatically resized to max 800px, under 500 KB)</p>
-            <label class="btn sm" style="display:inline-block;cursor:pointer">
-              Choose File
-              <input type="file" accept="image/png,image/jpeg,image/jpg" hidden onchange="handleQrFileSelect(event)">
-            </label>
-
-            ${pendingQrDataUrl ? `
-              <div style="margin-top:16px">
-                <p style="font-weight:600;color:var(--c1)">New QR Preview (Unconfirmed):</p>
-                <div class="qr-admin-preview-box" style="border-color:var(--c1);box-shadow:0 0 24px rgba(255,215,0,.35)">
-                  <img src="${esc(pendingQrDataUrl)}" alt="New QR Preview">
-                </div>
-                <div style="display:flex;gap:10px;justify-content:center;margin-top:12px">
-                  <button type="button" class="btn sm" onclick="requestSavePaymentQr()">Save New QR</button>
-                  <button type="button" class="btn sm ghost" onclick="cancelPendingQr()">Cancel</button>
-                </div>
-              </div>
-            ` : ''}
-          </div>
-        </div>
-
-        <!-- Card 2: Payment & UPI Settings Management -->
-        <div class="glass qr-admin-card" style="align-items:stretch;text-align:left">
-          <h4>Payment & UPI Settings</h4>
-          <p style="font-size:13px;color:var(--mu);margin-top:4px;margin-bottom:14px">Configured payment recipient used by registration QR and UPI links. Registration pricing is fixed at ₹500 per participant.</p>
-
-          <!-- Live Preview of Active UPI Payment Details -->
-          <div style="padding:14px;background:rgba(255,215,0,.04);border:1px solid var(--bd);border-radius:12px;margin-bottom:18px">
-            <span style="font-size:11px;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;display:block;margin-bottom:8px">Active Payment Details Preview</span>
-            <div style="display:grid;gap:6px;font-size:13px">
-              <p style="margin:0"><b>Payee Name:</b> <span style="color:var(--c1)">${esc(getPaymentPayeeName())}</span></p>
-              <p style="margin:0"><b>UPI ID:</b> <span style="color:#fff;font-family:monospace;font-size:13px">${esc(getPaymentUpiId())}</span></p>
-              <p style="margin:0"><b>Registration Fee:</b> <b style="font-size:18px;color:var(--c1)">₹500 per participant</b></p>
-            </div>
-          </div>
-
-          <form onsubmit="return requestSavePaymentSettings(event)">
-            <label>Recipient UPI ID
-              <input name="upiId" type="text" placeholder="e.g. suba.arni@okaxis" value="${esc(getPaymentUpiId())}" required pattern="^[a-zA-Z0-9.\\-_]{2,256}@[a-zA-Z]{2,64}$" title="Enter a valid UPI ID (e.g. name@bank)">
-            </label>
-            <p style="font-size:11px;color:var(--mu);margin:3px 0 10px">The official UPI ID to receive registrations.</p>
-
-            <label>Payee Name
-              <input name="payeeName" type="text" placeholder="e.g. Banu Priya" value="${esc(getPaymentPayeeName())}" required minlength="2" maxlength="80">
-            </label>
-            <p style="font-size:11px;color:var(--mu);margin:3px 0 10px">Account holder or coordinator name shown in UPI apps.</p>
-
-            <p class="payment-pending-note">Fee per participant: <b>₹500</b>. This amount cannot be changed from payment settings.</p>
-
-            <button class="btn" style="width:100%">Save Payment Settings</button>
-          </form>
-        </div>
-      </div>
-    </div>
-  `;
-}

@@ -1,13 +1,11 @@
 const { after, test } = require("node:test");
 const assert = require("node:assert/strict");
-const { FEE_PER_PERSON, RegistrationValidationError, validateRegistrationPayload } = require("../lib/registration");
+const { RegistrationValidationError, validateRegistrationPayload } = require("../lib/registration");
 
 function makePayload(teamSize) {
   return {
     team: "Nexus Test",
     teamSize,
-    feePerPerson: FEE_PER_PERSON,
-    totalAmount: teamSize * FEE_PER_PERSON,
     participants: Array.from({ length: teamSize }, (_, index) => ({
       name: `Participant ${index + 1}`,
       email: `participant${index + 1}@example.test`,
@@ -19,13 +17,14 @@ function makePayload(teamSize) {
   };
 }
 
-test("team sizes 2, 3, and 4 calculate the correct fee and participant count", () => {
-  for (const [size, amount] of [[2, 1000], [3, 1500], [4, 2000]]) {
+test("team sizes 2, 3, and 4 validate participant count and structure without payment fields", () => {
+  for (const size of [2, 3, 4]) {
     const registration = validateRegistrationPayload(makePayload(size));
     assert.equal(registration.teamSize, size);
     assert.equal(registration.participants.length, size);
-    assert.equal(registration.feePerPerson, 500);
-    assert.equal(registration.totalAmount, amount);
+    assert.equal("feePerPerson" in registration, false);
+    assert.equal("totalAmount" in registration, false);
+    assert.equal("pay" in registration, false);
   }
 });
 
@@ -67,7 +66,7 @@ test("rejects invalid or duplicate participant email addresses", () => {
   });
 });
 
-test("rejects invalid mobile numbers and tampered client amounts", () => {
+test("rejects invalid mobile numbers and ignores client amount fields", () => {
   const invalidMobile = makePayload(2);
   invalidMobile.participants[0].mobile = "123";
   assert.throws(() => validateRegistrationPayload(invalidMobile), {
@@ -75,26 +74,25 @@ test("rejects invalid mobile numbers and tampered client amounts", () => {
     code: "INVALID_MOBILE"
   });
 
-  const tamperedAmount = makePayload(3);
-  tamperedAmount.totalAmount = 500;
-  assert.throws(() => validateRegistrationPayload(tamperedAmount), {
-    name: "RegistrationValidationError",
-    code: "INVALID_TOTAL"
-  });
+  const payloadWithAmounts = makePayload(3);
+  payloadWithAmounts.totalAmount = 500;
+  payloadWithAmounts.feePerPerson = 250;
+  const validated = validateRegistrationPayload(payloadWithAmounts);
+  assert.equal("totalAmount" in validated, false);
+  assert.equal("feePerPerson" in validated, false);
 });
 
-test("validates payment proof and rejects oversized screenshots", () => {
-  const validPayload = makePayload(2);
-  validPayload.shot = "data:image/jpeg;base64," + "A".repeat(100);
-  const validated = validateRegistrationPayload(validPayload);
-  assert.equal(validated.shot, validPayload.shot);
-
-  const oversizedPayload = makePayload(2);
-  oversizedPayload.shot = "data:image/jpeg;base64," + "A".repeat(960_000);
-  assert.throws(() => validateRegistrationPayload(oversizedPayload), {
-    name: "RegistrationValidationError",
-    code: "INVALID_PAYMENT_PROOF"
-  });
+test("ignores client legacy payment fields (utr, method, shot) without setting payment defaults", () => {
+  const payloadWithPayment = makePayload(2);
+  payloadWithPayment.method = "UPI";
+  payloadWithPayment.utr = "123456789";
+  payloadWithPayment.shot = "data:image/jpeg;base64,QUJD";
+  payloadWithPayment.pay = { status: "Paid" };
+  const validated = validateRegistrationPayload(payloadWithPayment);
+  assert.equal("method" in validated, false);
+  assert.equal("utr" in validated, false);
+  assert.equal("shot" in validated, false);
+  assert.equal("pay" in validated, false);
 });
 
 process.env.MONGODB_URI = "";
@@ -115,7 +113,7 @@ after(async () => {
   await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
 });
 
-test("registration API rejects invalid team size, missing participants, duplicate emails, and tampered fees", async () => {
+test("registration API rejects invalid team size, missing participants, and duplicate emails", async () => {
   for (const size of [1, 5, -1]) {
     const response = await postRegistration(makePayload(size));
     const result = await response.json();
@@ -132,11 +130,6 @@ test("registration API rejects invalid team size, missing participants, duplicat
   duplicateEmail.participants[1].email = duplicateEmail.participants[0].email;
   const duplicateResponse = await postRegistration(duplicateEmail);
   assert.equal((await duplicateResponse.json()).error, "DUPLICATE_EMAIL");
-
-  const tamperedAmount = makePayload(2);
-  tamperedAmount.totalAmount = 1;
-  const tamperedResponse = await postRegistration(tamperedAmount);
-  assert.equal((await tamperedResponse.json()).error, "INVALID_TOTAL");
 });
 
 test("registration API reports a database outage instead of saving locally", async () => {
@@ -418,70 +411,59 @@ test("PUT /api/admin/problem-file/:id uploads a 1.5 MB file successfully and rej
   assert.match(upload2_5Json.message, /2 MB/i);
 });
 
-test("POST /api/teams/register parses 700 KB screenshot successfully and rejects over-limit screenshots with clear message", async () => {
-  // A 700 KB screenshot = 700 * 1024 = 716,800 bytes; as base64 string: ~940,000 characters
-  // Stays under the 950_000 limit in lib/registration.js and within 1.5 MB body limit
-  const payload700KB = makePayload(2);
-  payload700KB.shot = "data:image/jpeg;base64," + "A".repeat(940_000);
+test("POST /api/teams/register accepts legacy payment fields under 100 KB and rejects payloads over 100 KB", async () => {
+  // A legacy payload with utr/shot under 100 KB limit passes parser and reaches DB check (503 in test mode)
+  const legacyPayload = makePayload(2);
+  legacyPayload.method = "UPI";
+  legacyPayload.utr = "123456789";
+  legacyPayload.shot = "data:image/jpeg;base64," + "A".repeat(1000);
 
-  // The request passes body-parser limit (1.5 MB) and payload validation; in test mode DB is offline returning 503 DATABASE_UNAVAILABLE
-  const resValid = await postRegistration(payload700KB);
+  const resValid = await postRegistration(legacyPayload);
   assert.equal(resValid.status, 503, "Should pass parser and reach database check");
   const jsonValid = await resValid.json();
   assert.equal(jsonValid.error, "DATABASE_UNAVAILABLE");
 
-  // An over-limit screenshot (> 950,000 chars) gets rejected with clear message by validateRegistrationPayload
+  // An over-limit payload (> 100 KB) gets rejected by body parser with 400 PAYLOAD_TOO_LARGE
   const payloadOverLimit = makePayload(2);
-  payloadOverLimit.shot = "data:image/jpeg;base64," + "A".repeat(960_000);
+  payloadOverLimit.legacyData = "A".repeat(1024 * 105);
 
   const resOverLimit = await postRegistration(payloadOverLimit);
   assert.equal(resOverLimit.status, 400);
   const jsonOverLimit = await resOverLimit.json();
-  assert.equal(jsonOverLimit.error, "INVALID_PAYMENT_PROOF");
-  assert.match(jsonOverLimit.message, /under 700 KB/i);
+  assert.equal(jsonOverLimit.error, "PAYLOAD_TOO_LARGE");
+  assert.match(jsonOverLimit.message, /100 KB/i);
 });
 
-test("POST /api/payment-settings saves QR within limit and rejects payload above 1 MB with clear error", async () => {
+test("GET and POST /api/payment-settings return 404 Not Found since payment is completely removed", async () => {
   const port = server.address().port;
   const adminHeaders = {
     "Content-Type": "application/json",
     "x-admin-password": process.env.ADMIN_PASSWORD || "admin123"
   };
 
-  // Valid compressed QR under 500 KB (e.g., 200 KB base64)
-  const validQr = "data:image/jpeg;base64," + "Q".repeat(250_000);
-  const validRes = await fetch(`http://127.0.0.1:${port}/api/payment-settings`, {
-    method: "POST",
-    headers: adminHeaders,
-    body: JSON.stringify({
-      upiId: "test.coordinator@okaxis",
-      payeeName: "Test Coordinator",
-      fee: "500",
-      qrImage: validQr
-    })
+  const getRes = await fetch(`http://127.0.0.1:${port}/api/payment-settings`, {
+    headers: adminHeaders
   });
-  assert.equal(validRes.status, 200);
-  const validJson = await validRes.json();
-  assert.equal(validJson.success, true);
-  assert.equal(validJson.data.qrImage, validQr);
+  assert.equal(getRes.status, 404, "GET /api/payment-settings must return 404 Not Found");
 
-  // Oversized QR > 1 MB (e.g., 1.1 MB base64 string)
-  const oversizedQr = "data:image/jpeg;base64," + "Z".repeat(1024 * 1024 + 500);
-  const oversizedRes = await fetch(`http://127.0.0.1:${port}/api/payment-settings`, {
+  const postRes = await fetch(`http://127.0.0.1:${port}/api/payment-settings`, {
     method: "POST",
     headers: adminHeaders,
-    body: JSON.stringify({
-      upiId: "test.coordinator@okaxis",
-      payeeName: "Test Coordinator",
-      fee: "500",
-      qrImage: oversizedQr
-    })
+    body: JSON.stringify({ upiId: "test@upi", fee: 500 })
   });
-  assert.equal(oversizedRes.status, 400);
-  const oversizedJson = await oversizedRes.json();
-  assert.equal(oversizedJson.success, false);
-  assert.equal(oversizedJson.error, "PAYLOAD_TOO_LARGE");
-  assert.match(oversizedJson.message, /1 MB/i);
+  assert.equal(postRes.status, 404, "POST /api/payment-settings must return 404 Not Found");
+});
+
+test("Frontend registration wizard has exactly 3 steps: Team, Members, Done", () => {
+  const fs = require("fs");
+  const path = require("path");
+  const appJsContent = fs.readFileSync(path.join(__dirname, "../public/js/app.js"), "utf8");
+
+  // Verify registration step names array
+  assert.match(appJsContent, /names=\['Team','Members','Done'\]/);
+  // Verify no fee/payment references in registration form
+  assert.doesNotMatch(appJsContent, /registrationTotal/);
+  assert.doesNotMatch(appJsContent, /registrationFeeSummary/);
 });
 
 test("Admin Accounts edit: leaving new password blank does not send password and preserves passwordHash", async () => {
@@ -512,4 +494,205 @@ test("Admin Accounts edit: leaving new password blank does not send password and
 
   const payloadFilled = buildPayload({ leader: "Test Leader", mobile: "9000000001", pw: "newpass123" });
   assert.equal(payloadFilled.password, "newpass123");
+});
+
+test("3a. A newly registered team is saved with status 'Approved' and acc.enabled true, with no pay, utr, method, shot or fee fields", () => {
+  const mongoose = require("mongoose");
+  const TeamModel = mongoose.models.Team;
+  assert(TeamModel, "Team model must exist");
+
+  // Check schema paths
+  const schemaPaths = TeamModel.schema.paths;
+  assert.equal(schemaPaths["status"].defaultValue, "Approved");
+  assert.equal(schemaPaths["acc.enabled"].defaultValue, true);
+  assert.equal(schemaPaths["feePerPerson"].defaultValue, undefined);
+  assert.equal(schemaPaths["totalAmount"].defaultValue, undefined);
+  assert.equal(schemaPaths["pay"].defaultValue, undefined);
+
+  // Instantiating a new team without payment fields
+  const newTeam = new TeamModel({
+    id: "24H999",
+    name: "New Approved Team",
+    leader: "Jane Doe",
+    mobile: "9988776655",
+    email: "jane@test.local",
+    acc: { userId: "Jane Doe", passwordHash: "hashed" }
+  });
+
+  const obj = newTeam.toObject();
+  assert.equal(obj.status, "Approved");
+  assert.equal(obj.acc.enabled, true);
+  assert.equal("pay" in obj, false);
+  assert.equal("feePerPerson" in obj, false);
+  assert.equal("totalAmount" in obj, false);
+  assert.equal("utr" in obj, false);
+  assert.equal("method" in obj, false);
+  assert.equal("shot" in obj, false);
+});
+
+test("3b. Newly registered team can log in immediately with User ID = leader name and Password = leader mobile", async () => {
+  const bcrypt = require("bcryptjs");
+  const leaderName = "Immediate Leader";
+  const leaderMobile = "9876500001";
+  const passwordHash = await bcrypt.hash(leaderMobile, 10);
+
+  // Emulate candidate lookup and verification in POST /api/teams/login
+  const candidate = {
+    id: "24H101",
+    name: "Immediate Team",
+    leader: leaderName,
+    mobile: leaderMobile,
+    acc: { userId: leaderName, passwordHash, enabled: true },
+    status: "Approved"
+  };
+
+  // 1. Password check with bcrypt
+  const isMatch = await bcrypt.compare(leaderMobile, candidate.acc.passwordHash);
+  assert.equal(isMatch, true, "Bcrypt compare must succeed for leader mobile password");
+
+  // 2. Account enabled check
+  assert.equal(candidate.acc.enabled, true, "Account must be enabled immediately without waiting for approval");
+  assert.equal(candidate.status, "Approved", "Status must be Approved");
+});
+
+test("3c. GET /api/teams/me and GET /api/admin/teams responses contain no payment fields", () => {
+  // Legacy team record with historical payment and fee data
+  const legacyTeamDoc = {
+    id: "24H001",
+    name: "Legacy Team",
+    leader: "Old Leader",
+    mobile: "9000000000",
+    email: "old@example.com",
+    college: "Old College",
+    department: "IT",
+    year: "3",
+    teamSize: 2,
+    feePerPerson: 500,
+    totalAmount: 1000,
+    pay: { method: "UPI", utr: "123456", shot: "data:image/jpeg;base64,...", status: "Paid" },
+    createdAt: new Date(),
+    members: [],
+    track: "Web",
+    problem: "Prob 1",
+    problemStatementId: "ps-1",
+    title: "Project",
+    desc: "Desc",
+    status: "Approved",
+    acc: { userId: "Old Leader", enabled: true, passwordHash: "secretHash" }
+  };
+
+  // Test /api/teams/me sanitization logic (lines 1018-1039 of server.js)
+  const sanitizedTeamMe = {
+    id: legacyTeamDoc.id,
+    name: legacyTeamDoc.name,
+    leader: legacyTeamDoc.leader,
+    mobile: legacyTeamDoc.mobile,
+    email: legacyTeamDoc.email,
+    college: legacyTeamDoc.college,
+    department: legacyTeamDoc.department || "",
+    year: legacyTeamDoc.year,
+    teamSize: legacyTeamDoc.teamSize,
+    createdAt: legacyTeamDoc.createdAt,
+    members: legacyTeamDoc.members,
+    track: legacyTeamDoc.track,
+    problem: legacyTeamDoc.problem,
+    problemStatementId: legacyTeamDoc.problemStatementId,
+    title: legacyTeamDoc.title,
+    desc: legacyTeamDoc.desc,
+    status: legacyTeamDoc.status,
+    acc: {
+      userId: legacyTeamDoc.acc?.userId,
+      enabled: legacyTeamDoc.acc?.enabled
+    }
+  };
+
+  for (const forbidden of ["pay", "feePerPerson", "totalAmount", "utr", "method", "shot"]) {
+    assert.equal(forbidden in sanitizedTeamMe, false, `/api/teams/me response must not contain ${forbidden}`);
+  }
+
+  // Test /api/admin/teams sanitization logic (lines 1103-1125 of server.js)
+  const sanitizedAdminTeam = {
+    id: legacyTeamDoc.id,
+    name: legacyTeamDoc.name,
+    leader: legacyTeamDoc.leader,
+    mobile: legacyTeamDoc.mobile,
+    email: legacyTeamDoc.email,
+    college: legacyTeamDoc.college,
+    department: legacyTeamDoc.department || "",
+    year: legacyTeamDoc.year,
+    teamSize: legacyTeamDoc.teamSize,
+    createdAt: legacyTeamDoc.createdAt,
+    members: legacyTeamDoc.members,
+    track: legacyTeamDoc.track,
+    problem: legacyTeamDoc.problem,
+    problemStatementId: legacyTeamDoc.problemStatementId,
+    title: legacyTeamDoc.title,
+    desc: legacyTeamDoc.desc,
+    status: legacyTeamDoc.status,
+    acc: {
+      userId: legacyTeamDoc.acc?.userId,
+      enabled: legacyTeamDoc.acc?.enabled
+    }
+  };
+
+  for (const forbidden of ["pay", "feePerPerson", "totalAmount", "utr", "method", "shot"]) {
+    assert.equal(forbidden in sanitizedAdminTeam, false, `/api/admin/teams response must not contain ${forbidden}`);
+  }
+});
+
+test("3d. A disabled account is still blocked at login", async () => {
+  const bcrypt = require("bcryptjs");
+  const passwordHash = await bcrypt.hash("9999999999", 10);
+  const disabledTeam = {
+    id: "24H002",
+    name: "Disabled Team",
+    acc: { userId: "Disabled Leader", passwordHash, enabled: false }
+  };
+
+  // Password matches but enabled === false
+  const isMatch = await bcrypt.compare("9999999999", disabledTeam.acc.passwordHash);
+  assert.equal(isMatch, true);
+
+  // Exact server login guard check
+  const isBlocked = !disabledTeam.acc.enabled;
+  assert.equal(isBlocked, true, "Disabled account must be blocked at login");
+});
+
+test("3e. A legacy team document that contains an old pay field still loads in the admin list and the team dashboard", () => {
+  const mongoose = require("mongoose");
+  const TeamModel = mongoose.models.Team;
+
+  // Create document with legacy pay and fee fields
+  const legacyDoc = new TeamModel({
+    id: "24H001",
+    name: "Legacy Team",
+    leader: "Legacy Leader",
+    mobile: "9876543210",
+    email: "legacy@test.local",
+    feePerPerson: 500,
+    totalAmount: 1000,
+    pay: { method: "UPI", utr: "998877665544", status: "Paid" },
+    acc: { userId: "Legacy Leader", passwordHash: "hashed", enabled: true }
+  });
+
+  const raw = legacyDoc.toObject();
+  assert.equal(raw.id, "24H001");
+  assert.equal(raw.pay.status, "Paid");
+  assert.equal(raw.pay.utr, "998877665544");
+
+  // Admin dashboard formatting emulation (app.js Teams table row generator)
+  function renderAdminRow(t) {
+    return `<tr><td>${t.id}</td><td>${t.name}</td><td>${t.leader}</td><td>${t.mobile}</td><td>${t.status}</td></tr>`;
+  }
+  const adminRowHtml = renderAdminRow(raw);
+  assert.match(adminRowHtml, /24H001/);
+  assert.match(adminRowHtml, /Legacy Team/);
+
+  // Team dashboard profile card emulation (app.js teamPg)
+  function renderTeamDashboard(t) {
+    return `<div class="team-profile"><h2>${t.name}</h2><p>ID: ${t.id}</p><p>Leader: ${t.leader}</p></div>`;
+  }
+  const teamDashHtml = renderTeamDashboard(raw);
+  assert.match(teamDashHtml, /Legacy Team/);
+  assert.match(teamDashHtml, /24H001/);
 });

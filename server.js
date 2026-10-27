@@ -129,11 +129,11 @@ app.use(cors({
   origin: true
 }));
 // Support JSON payloads with route-level body limits:
-// - POST /api/teams/register: 1.5 MB limit (accommodates 700 KB screenshot = ~0.95 MB base64 plus registration fields)
+// - POST /api/teams/register: 100 KB limit
 // - PUT /api/admin/problem-file/:id: 3.5 MB limit (accommodates up to 2 MB binary files = ~2.7 MB base64)
-// - POST /api/payment-settings & all other routes: 1 MB default
+// - All other routes: 1 MB default
 const defaultJsonParser = express.json({ limit: "1mb" });
-const registerJsonParser = express.json({ limit: "1.5mb" });
+const registerJsonParser = express.json({ limit: "100kb" });
 const problemFileJsonParser = express.json({ limit: "3.5mb" });
 
 app.use((req, res, next) => {
@@ -151,11 +151,9 @@ app.use((err, req, res, next) => {
   if (err && (err.type === "entity.too.large" || err.status === 413)) {
     let limitMsg = "Request payload exceeds the maximum allowed size of 1 MB.";
     if (req.path === "/api/teams/register") {
-      limitMsg = "Registration payload exceeds the maximum allowed size of 1.5 MB. Please ensure screenshot is under 700 KB.";
+      limitMsg = "Registration payload exceeds the maximum allowed size of 100 KB.";
     } else if (req.path.startsWith("/api/admin/problem-file/")) {
       limitMsg = "Problem statement file payload exceeds the maximum allowed size of 3 MB.";
-    } else if (req.path === "/api/payment-settings") {
-      limitMsg = "Payment settings payload exceeds the maximum allowed limit of 1 MB. Please ensure the QR image is compressed.";
     }
     return res.status(400).json({
       success: false,
@@ -176,7 +174,6 @@ app.get("/", (req, res) => {
 const DB_RETRY_COOLDOWN_MS = 5000;
 let cachedDbPromise = null;
 let nextDbRetryAt = 0;
-let paymentFallbackWarned = false;
 
 function isDatabaseUnavailable(err) {
   return err?.code === "MONGODB_URI_NOT_CONFIGURED"
@@ -198,7 +195,6 @@ mongoose.connection.on("connecting", () => {
 });
 mongoose.connection.on("connected", () => {
   nextDbRetryAt = 0;
-  paymentFallbackWarned = false;
   console.log("[MongoDB] State: Connected successfully.");
 });
 mongoose.connection.on("open", () => {
@@ -250,18 +246,6 @@ async function getDbConnection() {
   return cachedDbPromise;
 }
 
-// Payment Settings Schema
-const paymentSettingsSchema = new mongoose.Schema({
-  key: { type: String, required: true, unique: true, default: "global_payment_settings" },
-  upiId: { type: String, required: true, default: "suba.arni@okaxis" },
-  payeeName: { type: String, required: true, default: "Banu Priya" },
-  fee: { type: String, required: true, default: "500" },
-  qrImage: { type: String, default: "" },
-  updatedAt: { type: Date, default: Date.now }
-});
-
-const PaymentSettings = mongoose.models.PaymentSettings || mongoose.model("PaymentSettings", paymentSettingsSchema);
-
 // Event Data Schema (Single Document "global_event" for event info, timeline, rules, prizes, judges, FAQ, tracks, files, announcements)
 const eventDataSchema = new mongoose.Schema({
   key: { type: String, required: true, unique: true, default: "global_event" },
@@ -271,11 +255,7 @@ const eventDataSchema = new mongoose.Schema({
     date: { type: String, default: "" },
     time: { type: String, default: "" },
     venue: { type: String, default: "" },
-    fee: { type: String, default: "500" },
-    upiId: { type: String, default: "" },
-    payeeName: { type: String, default: "" },
-    contact: { type: String, default: "" },
-    qrImage: { type: String, default: "" }
+    contact: { type: String, default: "" }
   },
   timeline: { type: [{ t: String, d: String }], default: [] },
   rules: { type: [{ t: String, d: String }], default: [] },
@@ -323,7 +303,7 @@ const teamMemberSchema = new mongoose.Schema({
   year: { type: String, default: "1", trim: true }
 }, { _id: false });
 
-// Team Schema (Full MongoDB persistence for teams, accounts, projects, & payment reviews)
+// Team Schema (Full MongoDB persistence for teams, accounts, and projects)
 const teamSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true, index: true }, // Format: 24H001
   name: { type: String, required: true, trim: true },
@@ -334,8 +314,8 @@ const teamSchema = new mongoose.Schema({
   department: { type: String, default: "", trim: true },
   year: { type: String, default: "1", trim: true },
   teamSize: { type: Number, min: 1, max: 4, default: 4 },
-  feePerPerson: { type: Number, default: 500 },
-  totalAmount: { type: Number, default: 2000 },
+  feePerPerson: { type: Number, required: false },
+  totalAmount: { type: Number, required: false },
   members: { type: [teamMemberSchema], default: [] },
   track: { type: String, default: "", trim: true },
   problem: { type: String, default: "", trim: true },
@@ -343,16 +323,14 @@ const teamSchema = new mongoose.Schema({
   title: { type: String, default: "", trim: true },
   desc: { type: String, default: "", trim: true },
   pay: {
-    method: { type: String, default: "UPI", trim: true },
-    utr: { type: String, default: "", trim: true, index: true },
-    shot: { type: String, default: "" }, // Safe base64 or storage url
-    status: { type: String, enum: ["Pending", "Paid", "Rejected"], default: "Pending", index: true }
+    type: mongoose.Schema.Types.Mixed,
+    default: undefined
   },
-  status: { type: String, enum: ["Pending", "Approved", "Rejected"], default: "Pending", index: true },
+  status: { type: String, enum: ["Pending", "Approved", "Rejected"], default: "Approved", index: true },
   acc: {
     userId: { type: String, required: true, trim: true, index: true },
     passwordHash: { type: String, required: true }, // Salted bcrypt hash, NEVER plaintext
-    enabled: { type: Boolean, default: false, index: true }
+    enabled: { type: Boolean, default: true, index: true }
   },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
@@ -400,15 +378,6 @@ sessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 const Session = mongoose.models.Session || mongoose.model("Session", sessionSchema);
 
 // Fallback in-memory store if MongoDB is offline or unreachable
-let memoryPaymentSettings = {
-  key: "global_payment_settings",
-  upiId: "suba.arni@okaxis",
-  payeeName: "Banu Priya",
-  fee: "500",
-  qrImage: "",
-  updatedAt: new Date().toISOString()
-};
-
 let memoryEventData = {
   key: "global_event",
   event: {
@@ -417,11 +386,7 @@ let memoryEventData = {
     date: "2026-10-30",
     time: "10:00 AM (Start: Oct 30, 10:00 AM · End: Oct 31, 1:00 PM)",
     venue: "IT Lab, B Block, Excel Engineering College (Autonomous), Komarapalayam",
-    fee: "500",
-    upiId: "suba.arni@okaxis",
-    payeeName: "Banu Priya",
-    contact: "Coordinators: Mrs. Banupriya (AP/IT) · Mrs. Divya K. (AP/IT) | Excel Engineering College (Autonomous), Komarapalayam – 637303, Namakkal District",
-    qrImage: ""
+    contact: "Coordinators: Mrs. Banupriya (AP/IT) · Mrs. Divya K. (AP/IT) | Excel Engineering College (Autonomous), Komarapalayam – 637303, Namakkal District"
   },
   timeline: [
     { t: "Day 1 – 10:00 AM (Oct 30)", d: "Inauguration & Hackathon Commencement at IT Lab, B Block" },
@@ -433,7 +398,7 @@ let memoryEventData = {
     { t: "Day 2 – 01:00 PM (Oct 31)", d: "Valedictory Ceremony & Prize Distribution" }
   ],
   rules: [
-    { t: "Eligibility & Team Size", d: "Open to students of all years. Each team must consist of 2 to 4 members, including 1 Team Leader. Registration is ₹500 per participant." },
+    { t: "Eligibility & Team Size", d: "Open to students of all years. Each team must consist of 2 to 4 members, including 1 Team Leader." },
     { t: "Hackathon Duration", d: "Continuous 26-hour hackathon starting October 30, 2026 at 10:00 AM and concluding October 31, 2026 at 1:00 PM." },
     { t: "Venue & Conduct", d: "The event will be held physically at IT Lab, B Block. Participants must maintain academic integrity and professional conduct." },
     { t: "Evaluation Criteria", d: "Projects are evaluated by industry experts on innovation, technical implementation, feasibility, presentation, and team collaboration." }
@@ -450,7 +415,7 @@ let memoryEventData = {
   ],
   faq: [
     { t: "Who can participate in 26 HRS HACKATHON – NEXUS?", d: "Students from all years across engineering and technology disciplines are eligible to participate." },
-    { t: "What is the required team size?", d: "Each team must have 2 to 4 members, including the Team Leader. Registration costs ₹500 per participant." },
+    { t: "What is the required team size?", d: "Each team must have 2 to 4 members, including the Team Leader." },
     { t: "Where will the hackathon take place?", d: "The event will be conducted at IT Lab, B Block, Excel Engineering College (Autonomous), Komarapalayam." },
     { t: "When does the event start and end?", d: "It begins on October 30, 2026 at 10:00 AM IST and concludes on October 31, 2026 at 1:00 PM IST (26 hours duration)." },
     { t: "Who are the event coordinators?", d: "Faculty Coordinators: Mrs. Banupriya (AP/IT) and Mrs. Divya K. (AP/IT), Department of Information Technology." }
@@ -874,24 +839,16 @@ app.post("/api/teams/register", rateLimitLogin, async (req, res) => {
           department: leader.department,
           year: leader.year,
           teamSize: registration.teamSize,
-          feePerPerson: registration.feePerPerson,
-          totalAmount: registration.totalAmount,
           members: normMembers,
           track: "",
           problem: "",
           title: "",
           desc: "",
-          pay: {
-            method: registration.method,
-            utr: registration.utr,
-            shot: registration.shot,
-            status: "Pending"
-          },
-          status: "Pending",
+          status: "Approved",
           acc: {
             userId: leader.name,
             passwordHash,
-            enabled: false // Admin approval required
+            enabled: true
           }
         });
       } catch (createErr) {
@@ -916,17 +873,14 @@ app.post("/api/teams/register", rateLimitLogin, async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      message: "Team registration successful! Please wait for admin approval.",
+      message: "Team registration successful! You can log in immediately.",
       data: {
         id: createdTeam.id,
         name: createdTeam.name,
         leader: createdTeam.leader,
         teamSize: createdTeam.teamSize,
-        feePerPerson: createdTeam.feePerPerson,
-        totalAmount: createdTeam.totalAmount,
         userId: createdTeam.acc.userId,
         status: createdTeam.status,
-        payStatus: createdTeam.pay.status,
         createdAt: createdTeam.createdAt
       }
     });
@@ -1070,8 +1024,6 @@ app.get("/api/teams/me", authenticateTeam, async (req, res) => {
         department: team.department || "",
         year: team.year,
         teamSize: team.teamSize || (1 + (team.members || []).length),
-        feePerPerson: team.feePerPerson || 500,
-        totalAmount: team.totalAmount || (team.teamSize || (1 + (team.members || []).length)) * 500,
         createdAt: team.createdAt,
         members: team.members,
         track: team.track,
@@ -1079,12 +1031,6 @@ app.get("/api/teams/me", authenticateTeam, async (req, res) => {
         problemStatementId: team.problemStatementId,
         title: team.title,
         desc: team.desc,
-        pay: {
-          method: team.pay?.method || "UPI",
-          utr: team.pay?.utr || "",
-          status: team.pay?.status || "Pending",
-          hasProof: Boolean(team.pay?.shot)
-        },
         status: team.status,
         acc: {
           userId: team.acc?.userId,
@@ -1149,7 +1095,7 @@ app.post("/api/teams/logout", async (req, res) => {
 
 // ADMIN TEAM MANAGEMENT ENDPOINTS (Strictly protected by authenticateAdmin)
 
-// GET /api/admin/teams - List all teams for Admin Dashboard (excludes large screenshot data)
+// GET /api/admin/teams - List all teams for Admin Dashboard
 app.get("/api/admin/teams", authenticateAdmin, async (req, res) => {
   try {
     await getDbConnection();
@@ -1164,8 +1110,6 @@ app.get("/api/admin/teams", authenticateAdmin, async (req, res) => {
       department: t.department || "",
       year: t.year,
       teamSize: t.teamSize || (1 + (t.members || []).length),
-      feePerPerson: t.feePerPerson || 500,
-      totalAmount: t.totalAmount || (t.teamSize || (1 + (t.members || []).length)) * 500,
       createdAt: t.createdAt,
       members: t.members,
       track: t.track,
@@ -1173,12 +1117,6 @@ app.get("/api/admin/teams", authenticateAdmin, async (req, res) => {
       problemStatementId: t.problemStatementId,
       title: t.title,
       desc: t.desc,
-      pay: {
-        method: t.pay?.method || "UPI",
-        utr: t.pay?.utr || "",
-        status: t.pay?.status || "Pending",
-        hasShot: Boolean(t.pay?.shot)
-      },
       status: t.status,
       acc: {
         userId: t.acc?.userId,
@@ -1196,32 +1134,12 @@ app.get("/api/admin/teams", authenticateAdmin, async (req, res) => {
   }
 });
 
-// GET /api/admin/teams/:id/screenshot - Authenticated admin retrieves payment screenshot
-app.get("/api/admin/teams/:id/screenshot", authenticateAdmin, async (req, res) => {
-  try {
-    await getDbConnection();
-    const targetId = req.params.id;
-    const team = await Team.findOne({ id: targetId }, { "pay.shot": 1 }).lean();
-    if (!team) {
-      return res.status(404).json({ success: false, error: "TEAM_NOT_FOUND", message: "Team not found." });
-    }
-    const shot = team.pay?.shot || "";
-    if (!shot) {
-      return res.status(404).json({ success: false, error: "NO_SCREENSHOT", message: "No payment screenshot found for this team." });
-    }
-    return res.status(200).json({ success: true, shot });
-  } catch (err) {
-    console.error("Admin get team screenshot error:", err);
-    return res.status(500).json({ success: false, error: "SERVER_ERROR", message: "Failed to load payment screenshot." });
-  }
-});
-
-// PUT /api/admin/teams/:id - Admin update team details, payment status, registration approval
+// PUT /api/admin/teams/:id - Admin update team details, registration approval
 app.put("/api/admin/teams/:id", authenticateAdmin, async (req, res) => {
   try {
     await getDbConnection();
     const targetId = req.params.id;
-    const { name, leader, mobile, email, college, department, year, track, problem, title, desc, ps, st, utr, members, enabled, password } = req.body || {};
+    const { name, leader, mobile, email, college, department, year, track, problem, title, desc, st, members, enabled, password } = req.body || {};
 
     const existingTeam = await Team.findOne({ id: targetId });
     if (!existingTeam) {
@@ -1280,8 +1198,6 @@ app.put("/api/admin/teams/:id", authenticateAdmin, async (req, res) => {
     if (problem !== undefined) updateFields.problem = String(problem).trim();
     if (title !== undefined) updateFields.title = String(title).trim();
     if (desc !== undefined) updateFields.desc = String(desc).trim();
-    if (ps !== undefined) updateFields["pay.status"] = ps;
-    if (utr !== undefined) updateFields["pay.utr"] = String(utr).trim();
     if (st !== undefined) updateFields.status = st;
     if (enabled !== undefined) updateFields["acc.enabled"] = Boolean(enabled);
     if (Array.isArray(members)) updateFields.members = members;
@@ -1332,171 +1248,6 @@ app.delete("/api/admin/teams/:id", authenticateAdmin, async (req, res) => {
     return res.status(200).json({ success: true, message: `Team ${targetId} deleted successfully.` });
   } catch (err) {
     return res.status(500).json({ success: false, error: "SERVER_ERROR", message: "Failed to delete team." });
-  }
-});
-
-// GET /api/payment-settings - Public endpoint to retrieve active payment configuration
-app.get("/api/payment-settings", async (req, res) => {
-  try {
-    if (process.env.MONGODB_URI) {
-      try {
-        await getDbConnection();
-        let doc = await PaymentSettings.findOne({ key: "global_payment_settings" }).lean();
-        if (!doc) {
-          doc = await PaymentSettings.create(memoryPaymentSettings);
-        }
-        return res.status(200).json({
-          success: true,
-          source: "database",
-          data: {
-            upiId: doc.upiId,
-            payeeName: doc.payeeName,
-            fee: doc.fee,
-            qrImage: doc.qrImage || "",
-            updatedAt: doc.updatedAt
-          }
-        });
-      } catch {
-        if (!paymentFallbackWarned) {
-          console.warn("[Payment settings] MongoDB unavailable; serving the explicitly marked in-memory fallback.");
-          paymentFallbackWarned = true;
-        }
-      }
-    }
-
-    return res.status(200).json({
-      success: true,
-      source: "fallback",
-      data: {
-        upiId: memoryPaymentSettings.upiId,
-        payeeName: memoryPaymentSettings.payeeName,
-        fee: memoryPaymentSettings.fee,
-        qrImage: memoryPaymentSettings.qrImage || "",
-        updatedAt: memoryPaymentSettings.updatedAt
-      }
-    });
-  } catch (err) {
-    console.error("Error in /api/payment-settings:", err);
-    return res.status(500).json({
-      success: false,
-      error: "SERVER_ERROR",
-      message: "Failed to retrieve payment settings."
-    });
-  }
-});
-
-// POST /api/payment-settings - Protected endpoint to update active payment configuration
-app.post("/api/payment-settings", authenticateAdmin, async (req, res) => {
-  try {
-    const payloadStr = JSON.stringify(req.body || {});
-    if (payloadStr.length > 1024 * 1024) {
-      return res.status(400).json({
-        success: false,
-        error: "PAYLOAD_TOO_LARGE",
-        message: "Payment settings payload exceeds the maximum allowed limit of 1 MB. Please ensure the QR image is compressed."
-      });
-    }
-
-    const { upiId, payeeName, fee, qrImage } = req.body;
-
-    // Backend Validation: UPI ID
-    const upiRegex = /^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}$/;
-    if (!upiId || !upiRegex.test(String(upiId).trim())) {
-      return res.status(400).json({
-        success: false,
-        error: "INVALID_UPI_ID",
-        message: "Invalid UPI ID format. Expected format: name@bank"
-      });
-    }
-
-    // Backend Validation: Payee Name
-    const cleanPayee = String(payeeName || "").trim();
-    if (!cleanPayee || cleanPayee.length < 2 || cleanPayee.length > 80) {
-      return res.status(400).json({
-        success: false,
-        error: "INVALID_PAYEE_NAME",
-        message: "Payee Name must be between 2 and 80 characters."
-      });
-    }
-
-    // Backend Validation: Fee Amount
-    const cleanFee = String(fee || "").trim();
-    const numFee = Number(cleanFee);
-    if (!cleanFee || isNaN(numFee) || numFee <= 0 || !/^\d+(\.\d{1,2})?$/.test(cleanFee)) {
-      return res.status(400).json({
-        success: false,
-        error: "INVALID_FEE_AMOUNT",
-        message: "Fee must be a valid positive number with up to 2 decimal places."
-      });
-    }
-    const formattedFee = (Math.round(numFee * 100) / 100).toFixed(cleanFee.includes(".") ? 2 : 0);
-
-    const updatePayload = {
-      upiId: String(upiId).trim(),
-      payeeName: cleanPayee,
-      fee: formattedFee,
-      qrImage: typeof qrImage === "string" ? qrImage : (memoryPaymentSettings.qrImage || ""),
-      updatedAt: new Date()
-    };
-
-    let savedToDb = false;
-
-    if (process.env.MONGODB_URI) {
-      try {
-        await getDbConnection();
-        const updated = await PaymentSettings.findOneAndUpdate(
-          { key: "global_payment_settings" },
-          updatePayload,
-          { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
-        ).lean();
-
-        savedToDb = true;
-        Object.assign(memoryPaymentSettings, updatePayload);
-
-        return res.status(200).json({
-          success: true,
-          database: "connected",
-          message: "Payment settings saved to MongoDB successfully.",
-          data: {
-            upiId: updated.upiId,
-            payeeName: updated.payeeName,
-            fee: updated.fee,
-            qrImage: updated.qrImage || "",
-            updatedAt: updated.updatedAt
-          }
-        });
-      } catch (dbErr) {
-        console.warn(`[Payment settings] MongoDB write failed: ${dbErr.name}${dbErr.code ? ` (${dbErr.code})` : ""}`);
-      }
-    }
-
-    if (process.env.MONGODB_URI && !savedToDb) {
-      return databaseUnavailableResponse(res, "MongoDB database is currently unreachable. Settings could not be persisted to the database.");
-    }
-
-    // In-memory fallback if no DB configured
-    Object.assign(memoryPaymentSettings, updatePayload);
-
-    return res.status(200).json({
-      success: true,
-      database: "fallback",
-      message: "Payment settings saved in-memory (persistent database storage not configured).",
-      data: {
-        upiId: memoryPaymentSettings.upiId,
-        payeeName: memoryPaymentSettings.payeeName,
-        fee: memoryPaymentSettings.fee,
-        qrImage: memoryPaymentSettings.qrImage || "",
-        updatedAt: memoryPaymentSettings.updatedAt
-      }
-    });
-
-  } catch (err) {
-    console.error("Error updating payment settings:", err);
-    return res.status(500).json({
-      success: false,
-      error: "SERVER_ERROR",
-      message: "Internal server error updating payment settings."
-    });
   }
 });
 
@@ -1786,7 +1537,14 @@ app.get("/api/event", async (req, res) => {
             success: true,
             source: "database",
             data: {
-              event: doc.event || memoryEventData.event,
+              event: {
+                title: doc.event?.title || memoryEventData.event.title,
+                about: doc.event?.about || memoryEventData.event.about,
+                date: doc.event?.date || memoryEventData.event.date,
+                time: doc.event?.time || memoryEventData.event.time,
+                venue: doc.event?.venue || memoryEventData.event.venue,
+                contact: doc.event?.contact || memoryEventData.event.contact
+              },
               timeline: doc.timeline || [],
               rules: doc.rules || [],
               prizes: doc.prizes || [],
@@ -1853,11 +1611,7 @@ app.put("/api/event", authenticateAdmin, async (req, res) => {
       date: String(eventObj.date || "").slice(0, 50).trim(),
       time: String(eventObj.time || "").slice(0, 100).trim(),
       venue: String(eventObj.venue || "").slice(0, 300).trim(),
-      fee: String(eventObj.fee || "500").slice(0, 20).trim(),
-      upiId: String(eventObj.upiId || "").slice(0, 100).trim(),
-      payeeName: String(eventObj.payeeName || "").slice(0, 100).trim(),
-      contact: String(eventObj.contact || "").slice(0, 500).trim(),
-      qrImage: typeof eventObj.qrImage === "string" ? eventObj.qrImage.slice(0, 1500000) : ""
+      contact: String(eventObj.contact || "").slice(0, 500).trim()
     };
 
     const cleanPairs = (arr, maxItems = 100) => {
