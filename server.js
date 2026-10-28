@@ -260,7 +260,7 @@ const eventDataSchema = new mongoose.Schema({
   timeline: { type: [{ t: String, d: String }], default: [] },
   rules: { type: [{ t: String, d: String }], default: [] },
   prizes: { type: [{ t: String, d: String }], default: [] },
-  judges: { type: [{ t: String, d: String }], default: [] },
+  judges: { type: [{ t: String, d: String, img: { type: String, default: "" } }], default: [] },
   faq: { type: [{ t: String, d: String }], default: [] },
   tracks: { type: [{ name: String, problems: [String] }], default: [] },
   problemStatementFiles: {
@@ -1622,6 +1622,42 @@ app.put("/api/event", authenticateAdmin, async (req, res) => {
       })).filter(item => item.t || item.d);
     };
 
+    const validateJudgeImg = (img) => {
+      if (!img || typeof img !== "string" || !img.trim()) return "";
+      const val = img.trim();
+      if (val.length > 120) {
+        throw new Error("Judge image path must be at most 120 characters.");
+      }
+      if (!val.startsWith("assets/images/guests/")) {
+        throw new Error("Judge image path must start with 'assets/images/guests/'.");
+      }
+      if (!/\.(jpg|jpeg|png|webp)$/i.test(val)) {
+        throw new Error("Judge image path must end with .jpg, .jpeg, .png, or .webp.");
+      }
+      if (val.includes("..") || val.includes("//") || val.includes(":") || /\s/.test(val)) {
+        throw new Error("Judge image path must not contain '..', '//', ':', or spaces.");
+      }
+      return val;
+    };
+
+    let cleanJudgesList = [];
+    try {
+      if (Array.isArray(body.judges)) {
+        cleanJudgesList = body.judges.slice(0, 50).map(item => {
+          const t = String(item?.t || "").slice(0, 200).trim();
+          const d = String(item?.d || "").slice(0, 3000).trim();
+          const img = validateJudgeImg(item?.img);
+          return { t, d, img };
+        }).filter(item => item.t || item.d);
+      }
+    } catch (valErr) {
+      return res.status(400).json({
+        success: false,
+        error: "INVALID_JUDGE_IMAGE",
+        message: valErr.message
+      });
+    }
+
     const cleanTracks = (arr, maxItems = 50) => {
       if (!Array.isArray(arr)) return [];
       return arr.slice(0, maxItems).map(track => ({
@@ -1685,7 +1721,7 @@ app.put("/api/event", authenticateAdmin, async (req, res) => {
       timeline: cleanPairs(body.timeline, 50),
       rules: cleanPairs(body.rules, 50),
       prizes: cleanPairs(body.prizes, 50),
-      judges: cleanPairs(body.judges, 50),
+      judges: cleanJudgesList,
       faq: cleanPairs(body.faq, 50),
       tracks: cleanTracks(body.tracks, 50),
       problemStatementFiles: cleanProblemFilesMeta,

@@ -108,7 +108,12 @@ h2,.hero h3{text-shadow:0 0 20px rgba(255,215,0,.35),0 0 38px rgba(255,255,0,.18
 .tl .glass{position:relative}.tl .glass:before{content:"";position:absolute;left:-30px;top:26px;width:12px;height:12px;border-radius:50%;background:var(--c1);box-shadow:0 0 12px var(--c1),0 0 28px rgba(34,211,238,.44)}
 details.glass{cursor:pointer;margin-bottom:10px}summary{font-weight:600}details p{color:var(--mu);margin-top:8px}
 .prize b{font:700 28px 'Space Grotesk';color:var(--c4)}
-.av{width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,var(--c3),var(--c1));margin-bottom:10px}
+.av{width:88px;height:88px;border-radius:50%;margin:0 auto 12px auto;display:flex;align-items:center;justify-content:center}
+.guest-photo-frame{width:88px;height:88px;border-radius:50%;border:1px solid rgba(255,215,0,.6);box-shadow:0 0 16px rgba(255,215,0,.35),0 0 28px rgba(255,255,0,.15);object-fit:cover;display:block;margin:0 auto 12px auto;background:#0d0d0d}
+.guest-initials-avatar{width:88px;height:88px;border-radius:50%;border:1px solid rgba(255,215,0,.7);box-shadow:0 0 16px rgba(255,215,0,.35),0 0 28px rgba(255,255,0,.15);background:linear-gradient(135deg,rgba(40,32,15,.95),rgba(18,15,8,.95));display:flex;align-items:center;justify-content:center;color:#FFD700;font:700 22px 'Space Grotesk',sans-serif;letter-spacing:1px;text-shadow:0 0 12px rgba(255,215,0,.5);margin:0 auto 12px auto;user-select:none}
+#judges .glass{text-align:center;display:flex;flex-direction:column;align-items:center}
+#judges .glass h3{margin:4px 0 6px 0;font-size:18px}
+#judges .glass p{margin:0;font-size:13px;line-height:1.4}
 form label{display:block;font-size:13px;color:var(--mu);margin-bottom:12px}
 input,select,textarea{width:100%;margin-top:4px;padding:10px 12px;border-radius:9px;border:1px solid var(--bd);background:rgba(8,12,30,.8);color:var(--tx);font:15px Inter}
 input:focus,select:focus,textarea:focus{outline:1px solid rgba(34,211,238,.55);border-color:rgba(34,211,238,.58);box-shadow:0 0 0 3px rgba(34,211,238,.07),0 0 22px rgba(34,211,238,.13)}

@@ -396,6 +396,22 @@ function initScrollReveal(){
 /* ---------- helpers ---------- */
 const lines=(a,f)=>a.map(f).join('\n');
 const parse=(t,keys)=>t.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{const p=l.split('|').map(x=>x.trim());return Object.fromEntries(keys.map((k,i)=>[k,p[i]||'']))});
+function personInitials(name){
+  const clean = String(name || '').replace(/^(mr|ms|mrs|dr|prof)\.?\s+/i, '').trim();
+  const parts = clean.split(/\s+/).filter(Boolean);
+  if (!parts.length) return '?';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+function renderGuestAvatar(judge){
+  const name = String(judge?.t || '').trim();
+  const img = String(judge?.img || '').trim();
+  const inits = personInitials(name);
+  if (img) {
+    return `<div class="av"><img class="guest-photo-frame" src="${esc(img)}" alt="${esc(name)}" loading="lazy" onerror="this.outerHTML='<div class=\\'guest-initials-avatar\\' aria-label=\\'${esc(name)}\\'>${esc(inits)}</div>'"></div>`;
+  }
+  return `<div class="av"><div class="guest-initials-avatar" aria-label="${esc(name)}">${esc(inits)}</div></div>`;
+}
 const go=(h,sec)=>{location.hash='#/'+h;if(sec)setTimeout(()=>document.getElementById(sec)?.scrollIntoView(),80);$('nav')?.classList.remove('open')};
 const login=(role,id)=>{ses={role,id};sessionStorage.setItem('h24s',JSON.stringify(ses));if(role==='admin'){adminSessionStatus='unknown';adminSessionPromise=null;adminTeamsSyncAttempted=false}};
 const logout=async ()=>{
@@ -568,7 +584,7 @@ function home(){const e=db.event,L=(a,f,t)=>a.length?a.map(f).join(''):empty(t);
  <section id="timeline"><h2>Timeline</h2><div class="tl">${L(db.timeline,x=>`<div class="glass"><b>${esc(x.t)}</b><p>${esc(x.d)}</p></div>`,'Timeline not published yet')}</div></section>
  <section id="rules"><h2>Rules & Guidelines</h2>${L(db.rules,x=>`<details class="glass"><summary>${esc(x.t)}</summary><p>${esc(x.d)}</p></details>`,'Rules not published yet')}</section>
  <section id="prizes"><h2>Prizes & Recognition</h2><div class="grid">${L(db.prizes,x=>`<div class="glass prize"><h3>${esc(x.t)}</h3><b>${esc(x.d)}</b></div>`,'Prizes not published yet')}</div></section>
- <section id="judges"><h2>Guests & Industry Mentors</h2><div class="grid">${L(db.judges,x=>`<div class="glass"><div class="av"></div><h3>${esc(x.t)}</h3><p style="color:var(--mu)">${esc(x.d)}</p></div>`,'Judges and mentors not published yet')}</div></section>
+ <section id="judges"><h2>Guests & Industry Mentors</h2><div class="grid">${L(db.judges,x=>`<div class="glass">${renderGuestAvatar(x)}<h3>${esc(x.t)}</h3><p style="color:var(--mu)">${esc(x.d)}</p></div>`,'Judges and mentors not published yet')}</div></section>
  <section id="faq"><h2>Frequently Asked Questions</h2>${L(db.faq,x=>`<details class="glass"><summary>${esc(x.t)}</summary><p>${esc(x.d)}</p></details>`,'FAQ not published yet')}</section>
  <button id="whatsapp-trigger" class="whatsapp-trigger" type="button" onclick="openWhatsAppPopup()" aria-label="Join WhatsApp Group">
   <span class="whatsapp-tooltip" role="tooltip">Join WhatsApp Group</span>
@@ -898,7 +914,7 @@ async function saveTeamSelection(ev){
   save();view();toast('Track and problem statement saved');return false;
 }
 /* ---------- ADMIN ---------- */
-const ALIST={timeline:['t','d','Timeline (Title | Description)'],rules:['t','d','Rules (Title | Description)'],prizes:['t','d','Prizes (Category | Amount)'],judges:['t','d','Judges & Mentors (Name | Role)'],faq:['t','d','FAQ (Question | Answer)']};
+const ALIST={timeline:['t','d','Timeline (Title | Description)'],rules:['t','d','Rules (Title | Description)'],prizes:['t','d','Prizes (Category | Amount)'],judges:['t','d','Judges & Mentors (Name | Role | image path optional)'],faq:['t','d','FAQ (Question | Answer)']};
 const PROBLEM_FILE_EXTENSIONS=['pdf','doc','docx','ppt','pptx','zip'];
 function problemStatementFilesAdmin(){
  const current=db.problemStatementFiles.find(item=>item.id===adm.editProblemFileId),trackNames=[...new Set([...db.tracks.map(track=>track.name),...db.problemStatementFiles.map(item=>item.track)])];
@@ -1000,7 +1016,7 @@ function adminPg(){
  let h=`<section><h2>Admin Dashboard</h2>${adminSessionStatus==='unavailable'?'<p class="err">Could not verify the admin session. Your local dashboard data is preserved. <button class="btn sm" type="button" onclick="retryAdminSession()">Retry verification</button></p>':''}<div class="tabs">${tabs.map(t=>`<button class="btn ${adm.tab==t?'on':''}" onclick="adm.tab='${t}';view()">${tabLabels[t]||t[0].toUpperCase()+t.slice(1)}</button>`).join('')}<button class="btn ghost" type="button" onclick="refreshAdminTeams()" ${adminTeamsSyncPromise?'disabled':''}>Refresh teams</button></div>`;
  if(adm.tab=='overview')h+=`<div class="grid">${[['Total Teams',T.length],['Participants',T.reduce((n,t)=>n+1+t.members.length,0)],['Approved Teams',T.filter(t=>t.status=='Approved').length],['Active Accounts',T.filter(t=>t.acc?.enabled).length]].map(([l,n])=>`<div class="glass stat"><b>${n}</b>${l}</div>`).join('')}</div>`;
  if(adm.tab=='event'){const e=db.event;h+=`<form class="glass" onsubmit="return saveEv(event)"><div class="two">${['title','date','time','venue','contact'].map(k=>`<label>${k[0].toUpperCase()+k.slice(1)}<input name="${k}" type="${k=='date'?'date':'text'}" value="${esc(e[k])}"></label>`).join('')}</div><label>Description<textarea name="about">${esc(e.about)}</textarea></label>
-  ${Object.entries(ALIST).map(([k,[a,b,l]])=>`<label>${l} – one per line<textarea name="${k}">${esc(lines(db[k],x=>x.t+' | '+x.d))}</textarea></label>`).join('')}
+  ${Object.entries(ALIST).map(([k,[a,b,l]])=>`<label>${l} – one per line<textarea name="${k}">${esc(lines(db[k],x=>k==='judges'?(x.img?[x.t,x.d,x.img].join(' | '):[x.t,x.d].join(' | ')):x.t+' | '+x.d))}</textarea></label>`).join('')}
   <label>Tracks (Track | Problem 1 ; Problem 2 ...)<textarea name="tracks">${esc(lines(db.tracks,t=>t.name+' | '+t.problems.join(' ; ')))}</textarea></label><button class="btn">Save event data</button></form>`}
  if(adm.tab=='teams'){
   const q=adm.q.toLowerCase(),L=T.filter(t=>{
@@ -1055,7 +1071,7 @@ async function saveEv(ev){
   ev.preventDefault();
   const f=Object.fromEntries(new FormData(ev.target));
   ['title','date','time','venue','contact','about'].forEach(k=>db.event[k]=f[k]);
-  Object.keys(ALIST).forEach(k=>db[k]=parse(f[k],['t','d']));
+  Object.keys(ALIST).forEach(k=>{if(k==='judges'){db.judges=f.judges.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{const p=l.split('|').map(x=>x.trim());return{t:p[0]||'',d:p[1]||'',img:p[2]||''}})}else{db[k]=parse(f[k],['t','d'])}});
   const editedTracks=parse(f.tracks,['name','p']).map(t=>({name:t.name,problems:t.p.split(';').map(x=>x.trim()).filter(Boolean)}));
   for(const item of db.problemStatementFiles){
     let track=editedTracks.find(t=>t.name===item.track);

@@ -696,3 +696,117 @@ test("3e. A legacy team document that contains an old pay field still loads in t
   assert.match(teamDashHtml, /Legacy Team/);
   assert.match(teamDashHtml, /24H001/);
 });
+
+test("PUT /api/event validates judge img path strictly", async () => {
+  const port = server.address().port;
+  const adminHeaders = {
+    "Content-Type": "application/json",
+    "x-admin-password": process.env.ADMIN_PASSWORD || "admin123"
+  };
+
+  // 1. Valid judge img
+  const validRes = await fetch(`http://127.0.0.1:${port}/api/event`, {
+    method: "PUT",
+    headers: adminHeaders,
+    body: JSON.stringify({
+      judges: [
+        { t: "Mr. S. Alagupandi", d: "Industry Expert", img: "assets/images/guests/alagupandi.jpg" }
+      ]
+    })
+  });
+  assert.equal(validRes.status, 200);
+  const validJson = await validRes.json();
+  assert.equal(validJson.success, true);
+  assert.equal(validJson.data.judges[0].img, "assets/images/guests/alagupandi.jpg");
+
+  // 2. Reject external URL
+  const extRes = await fetch(`http://127.0.0.1:${port}/api/event`, {
+    method: "PUT",
+    headers: adminHeaders,
+    body: JSON.stringify({
+      judges: [
+        { t: "Judge", d: "Role", img: "https://example.com/photo.jpg" }
+      ]
+    })
+  });
+  assert.equal(extRes.status, 400);
+  const extJson = await extRes.json();
+  assert.equal(extJson.error, "INVALID_JUDGE_IMAGE");
+
+  // 3. Reject directory traversal '..'
+  const travRes = await fetch(`http://127.0.0.1:${port}/api/event`, {
+    method: "PUT",
+    headers: adminHeaders,
+    body: JSON.stringify({
+      judges: [
+        { t: "Judge", d: "Role", img: "assets/images/guests/../secret.jpg" }
+      ]
+    })
+  });
+  assert.equal(travRes.status, 400);
+
+  // 4. Reject invalid extension (.exe, .gif, etc)
+  const extnRes = await fetch(`http://127.0.0.1:${port}/api/event`, {
+    method: "PUT",
+    headers: adminHeaders,
+    body: JSON.stringify({
+      judges: [
+        { t: "Judge", d: "Role", img: "assets/images/guests/photo.gif" }
+      ]
+    })
+  });
+  assert.equal(extnRes.status, 400);
+
+  // 5. Reject paths with spaces or colon
+  const spaceRes = await fetch(`http://127.0.0.1:${port}/api/event`, {
+    method: "PUT",
+    headers: adminHeaders,
+    body: JSON.stringify({
+      judges: [
+        { t: "Judge", d: "Role", img: "assets/images/guests/my photo.jpg" }
+      ]
+    })
+  });
+  assert.equal(spaceRes.status, 400);
+});
+
+test("Frontend guest initials avatar fallback generates proper initials and escape attributes", () => {
+  // Test personInitials logic
+  function personInitials(name) {
+    const clean = String(name || "").replace(/^(mr|ms|mrs|dr|prof)\.?\s+/i, "").trim();
+    const parts = clean.split(/\s+/).filter(Boolean);
+    if (!parts.length) return "?";
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  }
+
+  function renderGuestAvatar(judge) {
+    const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    const name = String(judge?.t || "").trim();
+    const img = String(judge?.img || "").trim();
+    const inits = personInitials(name);
+    if (img) {
+      return `<div class="av"><img class="guest-photo-frame" src="${esc(img)}" alt="${esc(name)}" loading="lazy" onerror="this.outerHTML='<div class=\\'guest-initials-avatar\\' aria-label=\\'${esc(name)}\\'>${esc(inits)}</div>'"></div>`;
+    }
+    return `<div class="av"><div class="guest-initials-avatar" aria-label="${esc(name)}">${esc(inits)}</div></div>`;
+  }
+
+  // 1. Initial generation for "Mr. S. Alagupandi" -> "SA"
+  assert.equal(personInitials("Mr. S. Alagupandi"), "SA");
+  assert.equal(personInitials("Mr. G. Mohanraj"), "GM");
+  assert.equal(personInitials("Mr. A. Karthick"), "AK");
+  assert.equal(personInitials("Dr. Banupriya"), "BA");
+
+  // 2. Empty img produces initials avatar
+  const noImgHtml = renderGuestAvatar({ t: "Mr. S. Alagupandi", d: "Expert" });
+  assert.match(noImgHtml, /class="guest-initials-avatar"/);
+  assert.match(noImgHtml, />SA<\/div>/);
+  assert.match(noImgHtml, /aria-label="Mr. S. Alagupandi"/);
+
+  // 3. With img produces img tag with onerror fallback
+  const withImgHtml = renderGuestAvatar({ t: "Mr. S. Alagupandi", img: "assets/images/guests/alagupandi.jpg" });
+  assert.match(withImgHtml, /img class="guest-photo-frame"/);
+  assert.match(withImgHtml, /src="assets\/images\/guests\/alagupandi.jpg"/);
+  assert.match(withImgHtml, /loading="lazy"/);
+  assert.match(withImgHtml, /onerror=/);
+});
