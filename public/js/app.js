@@ -1,7 +1,8 @@
 /* 26 HRS HACKATHON – NEXUS – Excel Engineering College (Autonomous), Dept. of IT & Binary Brains Club. Data lives in localStorage (demo backend). */
 const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const KEY='h24db',TBA='To be announced';
-const WHATSAPP_GROUP_LINK='https://chat.whatsapp.com/BJ3qXPchD6JDrv3ADqXkqT';
+const WHATSAPP_GROUP_LINK='https://chat.whatsapp.com/BcjtI7Kzp4u2k5WqUAoR6t';
+const REGISTRATION_FORM_URL='https://docs.google.com/forms/d/e/1FAIpQLSfWvk6ViXp9JiS7hlvNDW0taWxvl1M3T_l8fygIIb5mKMgYVA/viewform';
 const DEF={event:{
   title:'26 HRS HACKATHON – NEXUS',
   about:'26 HRS HACKATHON – NEXUS is an intensive technical hackathon organized by Excel Engineering College (Autonomous), Department of Information Technology in association with Binary Brains – Domain Club, in collaboration with United Soft Tech, Salem. Open for students across all years to build innovative technological solutions.',
@@ -30,11 +31,7 @@ prizes:[
   {t:'Excellence Awards',d:'Certificates of Merit & Trophy for Winners'},
   {t:'Participation Certificate',d:'Official Certificate of Participation for all registered team members'}
 ],
-judges:[
-  {t:'Mr. S. Alagappandi',d:'Team Lead – United Soft Tech, Salem'},
-  {t:'Mr. G. Mohanraj',d:'Circuit Division – United Soft Tech, Salem'},
-  {t:'Mr. A. Karthick',d:'Graphic Designer – United Soft Tech, Salem'}
-],
+judges:[],
 faq:[
   {t:'Who can participate in 26 HRS HACKATHON – NEXUS?',d:'Students from all years across engineering and technology disciplines are eligible to participate.'},
   {t:'What is the required team size?',d:'Each team must have 2 to 4 members, including the Team Leader.'},
@@ -558,10 +555,11 @@ function closeWhatsAppPopup(){
  },220);
 }
 addEventListener('keydown',e=>{if(e.key==='Escape'){closeWhatsAppPopup()}});
+const REGISTRATION_OPEN=true;
 /* ---------- chrome ---------- */
 function chrome(){
  const r=location.hash.slice(2)||'home';
- const links=['home','about','timeline','rules','prizes','judges','faq'];
+ const links=['home','about','timeline','rules','prizes','faq'];
  const dash=ses?`<a class="nav-item ${r===(ses.role==='admin'?'admin':'team')?'active':''}" onclick="go('${ses.role==='admin'?'admin':'team'}')">Dashboard</a><a class="nav-item" onclick="logout()">Logout</a>`:`<a class="nav-item ${r==='login'?'active':''}" onclick="go('login')">Login</a>`;
  $('#hdr').innerHTML=`<div class="brand-wrap logo" onclick="go('home')" aria-label="Go to home page">
    <img class="brand-mark" src="assets/images/nexus-team-logo.jpeg" alt="NEXUS logo">
@@ -571,20 +569,19 @@ function chrome(){
    </div>
  </div>
  <button id="burger" class="btn sm ghost" onclick="$('nav').classList.toggle('open')" aria-label="Menu">☰</button>
- <nav>${links.map(s=>`<a class="nav-item ${r===s||(r==='home'&&s==='home')?'active':''}" onclick="go('home','${s}')">${s[0].toUpperCase()+s.slice(1)}</a>`).join('')}${dash}<a class="btn sm nav-cta" onclick="go('register')">Register Now</a></nav>`;
+ <nav>${links.map(s=>`<a class="nav-item ${r===s||(r==='home'&&s==='home')?'active':''}" onclick="go('home','${s}')">${s[0].toUpperCase()+s.slice(1)}</a>`).join('')}${dash}${REGISTRATION_OPEN?`<a class="btn sm nav-cta" href="${REGISTRATION_FORM_URL}" target="_blank" rel="noopener noreferrer">Register Now</a>`:''}</nav>`;
  $('#ftr').innerHTML=`<b>Excel Engineering College (Autonomous)</b> – Department of Information Technology & Binary Brains Club<br>Komarapalayam – 637303, Namakkal District, Tamil Nadu<br>${esc(db.event.contact)}`;
 }
 /* ---------- HOME ---------- */
 function home(){const e=db.event,L=(a,f,t)=>a.length?a.map(f).join(''):empty(t);
  return `<section class="hero"><h1>${esc(e.title)}</h1><h3>Department of Information Technology & Binary Brains Club<br>Excel Engineering College (Autonomous), Komarapalayam</h3>
  <p>${esc(e.about)}</p><div class="cd" id="cd"></div>
- <div class="hero-actions"><button class="btn" onclick="go('register')">Register Now</button><button class="btn ghost" onclick="go('home','about')">View Details</button></div></section>
+ <div class="hero-actions">${REGISTRATION_OPEN?`<a class="btn" href="${REGISTRATION_FORM_URL}" target="_blank" rel="noopener noreferrer">Register Now</a>`:''}<button class="btn ghost" onclick="go('home','about')">View Details</button></div></section>
  <section id="about"><h2>About Event</h2><div class="glass"><p>${esc(e.about)}</p><p style="color:var(--mu)"><b>Date:</b> ${esc(e.date)} · <b>Time:</b> ${esc(e.time)}<br><b>Venue:</b> ${esc(e.venue)}</p></div>
- <div class="grid" style="margin-top:16px">${['26 Hours Non-Stop','2–4 Members per Team','Technical Innovation','Mentorship: United Soft Tech','Prize Pool: ₹10,000','Students from All Years'].map(x=>`<div class="glass"><h3>${x}</h3></div>`).join('')}</div></section>
+ <div class="grid" style="margin-top:16px">${['26 Hours Non-Stop','2–4 Members per Team','Technical Innovation','Prize Pool: ₹10,000','Students from All Years'].map(x=>`<div class="glass"><h3>${x}</h3></div>`).join('')}</div></section>
  <section id="timeline"><h2>Timeline</h2><div class="tl">${L(db.timeline,x=>`<div class="glass"><b>${esc(x.t)}</b><p>${esc(x.d)}</p></div>`,'Timeline not published yet')}</div></section>
  <section id="rules"><h2>Rules & Guidelines</h2>${L(db.rules,x=>`<details class="glass"><summary>${esc(x.t)}</summary><p>${esc(x.d)}</p></details>`,'Rules not published yet')}</section>
  <section id="prizes"><h2>Prizes & Recognition</h2><div class="grid">${L(db.prizes,x=>`<div class="glass prize"><h3>${esc(x.t)}</h3><b>${esc(x.d)}</b></div>`,'Prizes not published yet')}</div></section>
- <section id="judges"><h2>Guests & Industry Mentors</h2><div class="grid">${L(db.judges,x=>`<div class="glass">${renderGuestAvatar(x)}<h3>${esc(x.t)}</h3><p style="color:var(--mu)">${esc(x.d)}</p></div>`,'Judges and mentors not published yet')}</div></section>
  <section id="faq"><h2>Frequently Asked Questions</h2>${L(db.faq,x=>`<details class="glass"><summary>${esc(x.t)}</summary><p>${esc(x.d)}</p></details>`,'FAQ not published yet')}</section>
  <button id="whatsapp-trigger" class="whatsapp-trigger" type="button" onclick="openWhatsAppPopup()" aria-label="Join WhatsApp Group">
   <span class="whatsapp-tooltip" role="tooltip">Join WhatsApp Group</span>
@@ -662,6 +659,9 @@ function participantSummary(participant,index){
 }
 function register(){
  const d=reg.d,s=reg.step,names=['Team','Members','Done'],size=registrationSize();
+ if(REGISTRATION_OPEN){
+  return `<section class="narrow registration-flow"><h2>Team Registration</h2><div class="glass" style="text-align:center;padding:32px 20px"><div style="font-size:36px;margin-bottom:12px">📝</div><h3 style="color:var(--c1);margin-bottom:12px;font-size:22px">Official Team Registration</h3><p style="color:var(--mu);max-width:540px;margin:0 auto 24px;line-height:1.6">Registration for 26 HRS HACKATHON – NEXUS is conducted via our official Google Form. Please click the button below to complete your team registration.</p><div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap"><a class="btn" href="${REGISTRATION_FORM_URL}" target="_blank" rel="noopener noreferrer">Open Registration Form</a><button class="btn ghost" type="button" onclick="go('home')">Back to Home</button></div></div></section>`;
+ }
  let h=`<section class="narrow registration-flow"><h2>Team Registration</h2><div class="steps">${names.map((n,i)=>`<span class="${i+1===s?'on':''}">${i+1}. ${n}</span>`).join('')}</div><div class="glass">`;
  if(s===1)h+=`<form id="registration-step1-form" onsubmit="return rs(event,1)"><div class="two">
  ${F('Team Name','team',d.team,'text','maxlength="100"')}
